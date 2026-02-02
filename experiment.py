@@ -111,17 +111,63 @@ def extract_flow(csv_file):
     return (time_col, flow_col, df)
 
 
-def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, threshold_flow=5.0):
+def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, threshold_flow=None, position=None):
     # find first time where flow exceeds threshold_flow
     if df is None or len(df) == 0:
         return None
     times = df[time_col].values
     flows = df[flow_col].values
-    over_idx = np.where(flows > threshold_flow)[0]
-    if len(over_idx) == 0:
-        return None
-    # start time when flow first exceeds threshold
-    t_start = float(times[over_idx[0]])
+    # try to detect start based on valve 2 state (position) if provided
+    t_start = None
+    if position is not None:
+        valve_col = None
+        for c in df.columns:
+            cl = c.lower()
+            if 'v2' in cl and 'state' in cl:
+                valve_col = c
+                break
+        if valve_col is not None:
+            # attempt numeric match first, then string
+            try:
+                vals_num = pd.to_numeric(df[valve_col], errors='coerce')
+                match_idx = np.where(vals_num == float(position))[0]
+            except Exception:
+                match_idx = np.array([], dtype=int)
+            if match_idx.size == 0:
+                # fallback to string comparison
+                try:
+                    match_idx = np.where(df[valve_col].astype(str).str.strip() == str(position))[0]
+                except Exception:
+                    match_idx = np.array([], dtype=int)
+            if match_idx.size > 0:
+                try:
+                    t_start = float(df.iloc[int(match_idx[0])][time_col])
+                except Exception:
+                    t_start = None
+
+    # if we didn't get a start from valve position, fall back to dynamic change detection
+    if t_start is None:
+        # sort by time to compute a baseline from the beginning of the file
+        try:
+            dsorted = df.sort_values(time_col)
+            fvals = dsorted[flow_col].values
+            tvals = dsorted[time_col].values
+        except Exception:
+            return None
+        n = len(fvals)
+        if n == 0:
+            return None
+        # baseline uses the first few samples (up to 5% of file or 10 samples)
+        baseline_count = max(1, min(10, int(max(1, n * 0.05))))
+        baseline = fvals[:baseline_count]
+        med = float(np.median(baseline))
+        std = float(np.std(baseline))
+        # dynamic threshold: use 3*sigma or a small absolute floor
+        dyn_thr = max(0.01, std * 3.0)
+        idx = np.where(np.abs(fvals - med) > dyn_thr)[0]
+        if idx.size == 0:
+            return None
+        t_start = float(tvals[int(idx[0])])
     # define middle-half window within dispense time
     if dispense_time_s is None or dispense_time_s <= 0:
         # fallback: average middle half of entire recording
@@ -488,7 +534,8 @@ class ExperimentGUI:
             avg = None
             try:
                 tcol, fcol, dfi = extract_flow(out_csv)
-                avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, dispense_time_s=disp_time, threshold_flow=5.0)
+                # use reservoir position to detect valve switch (V2 state) when available
+                avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, dispense_time_s=disp_time, position=p.get('pos'))
             except Exception:
                 avg = None
             # debug: print computed avg info to console for investigation
