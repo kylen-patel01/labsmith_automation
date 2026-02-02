@@ -1,3 +1,6 @@
+#experiment.py
+#author: Kylen Patel
+#Last updated: 2/2/2026
 import os
 import glob
 import time
@@ -148,7 +151,11 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
         fig = Figure(figsize=(8, 4))
         ax1 = fig.add_subplot(111)
         ax1.plot(df[time_col], df[flow_col], color='tab:blue', label='Flow (uL/min)')
-        ax1.set_xlabel(time_col)
+        # use a friendly x-label when the column represents seconds
+        if isinstance(time_col, str) and 'time' in time_col.lower():
+            ax1.set_xlabel('Time (s)')
+        else:
+            ax1.set_xlabel(time_col)
         ax1.set_ylabel('Flow (uL/min)', color='tab:blue')
         ax1.tick_params(axis='y', labelcolor='tab:blue')
         if pressure_col and pressure_col in df.columns:
@@ -507,13 +514,52 @@ class ExperimentGUI:
             # read and append using pandas (assume same columns)
             try:
                 dfs = []
-                for f in individual_csvs:
+                # Read each individual CSV and offset its time column so the combined
+                # file has a continuous time axis (e.g. 0-60 then 60-120 -> 0-120).
+                dfs = []
+                cumulative_offset = 0.0
+                time_col_name = None
+                for fpath in individual_csvs:
                     try:
-                        dfi = pd.read_csv(f, sep=';', skiprows=[0])
+                        dfi = pd.read_csv(fpath, sep=';', skiprows=[0])
                     except Exception:
-                        dfi = pd.read_csv(f, sep=',')
+                        dfi = pd.read_csv(fpath, sep=',')
+
+                    # find a time-like column in this dataframe
+                    tcols = [c for c in dfi.columns if 'time' in c.lower()]
+                    if tcols:
+                        tcol = tcols[0]
+                        # keep original values for potential parsing
+                        orig = dfi[tcol].astype(str)
+                        num = pd.to_numeric(orig, errors='coerce')
+                        if not num.isna().all():
+                            dfi[tcol] = num
+                        else:
+                            # try to parse time-of-day strings e.g. HH:MM:SS[.ms]
+                            parsed = pd.to_datetime(orig, errors='coerce')
+                            if parsed.notna().any():
+                                # convert to seconds relative to first timestamp in this file
+                                base = parsed.iloc[0]
+                                secs = (parsed - base).dt.total_seconds()
+                                dfi[tcol] = secs
+                        # ensure numeric and drop rows with NaN times
+                        dfi[tcol] = pd.to_numeric(dfi[tcol], errors='coerce')
+                        dfi = dfi.dropna(subset=[tcol])
+                        # normalize to start at zero for this file, then add cumulative offset
+                        if not dfi.empty:
+                            min_t = float(dfi[tcol].min())
+                            dfi[tcol] = dfi[tcol] - min_t + cumulative_offset
+                            cumulative_offset = float(dfi[tcol].max())
+                        # remember a canonical time column name (use first file's name)
+                        if time_col_name is None:
+                            time_col_name = tcol
+                        else:
+                            # if this file uses a different time column name, rename it
+                            if tcol != time_col_name:
+                                dfi = dfi.rename(columns={tcol: time_col_name})
                     dfs.append(dfi)
-                combined = pd.concat(dfs, ignore_index=True)
+
+                combined = pd.concat(dfs, ignore_index=True, sort=False)
                 combined.to_csv(combined_path, index=False)
                 # detect columns for overlay
                 time_col = None
