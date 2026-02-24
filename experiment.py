@@ -13,16 +13,73 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from PIL import Image, ImageTk
 import uProcess
+from collections import deque
+from matplotlib.animation import FuncAnimation
+import threading
 
-# Paths (adjust if needed)
+'''
+#flow rate live plotting
+PORT = "COM5"
+BAUDRATE = 115200
+
+serial_port = ShdlcSerialPort(port = PORT, baudrate = BAUDRATE)
+serial_port._serial.timeout = 0.1
+connection = ShdlcConnection(serial_port)
+device = slf3s(connection, slave_address = 0)
+device.start(water = True)
+
+time.sleep(0.15)
+window_seconds = 30
+sample_rate = 10
+max_points = window_seconds * sample_rate
+
+times = deque(maxlen=max_points)
+flows = deque(maxlen=max_points)
+t0 = time.time()
+fig, ax1 = plt.subplots()
+flow_line = ax1.plot([], [], linewidth = 2)
+ax1.set_xlabel('Time (s)')
+ax1.set_ylabel('Flow Rate (uL/min)')
+ax1.grid(True)
+def update(frame):
+    try:
+        flow, temp, flag = device.get_last()
+    except:
+        return flow_line
+    t = time.time() - t0
+    
+    
+    times.append(t)
+    flows.append(flow)
+    flow_line.set_data(times,flows)
+    ax1.set_xlim(max(0,t-window_seconds),t+0.5)
+    if flows:
+        ax1.set_ylim(min(flows)-5, max(flows)+5)
+    
+    return flow_line
+ani = FuncAnimation(
+    fig,
+    update,
+    interval = 100,
+    blit = False
+)
+try:
+    plt.show()
+
+finally:
+    device.stop()
+    serial_port.close()
+'''
+
+#Paths (adjust if needed)
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 CALIB_DIR = os.path.join(BASE_DIR, "CalibrationData")
-# base usq for experiment runs
+#base usq for experiment runs
 BASE_USQ = os.path.join(BASE_DIR, "experiment.usq")
 
 
 def find_calibration_curves(calib_root):
-    # Return dict keyed by subfolder name. Each value contains slope/intercept/r2 and optional csv
+    #Return dict keyed by subfolder name. Each value contains slope/intercept/r2 and optional csv
     curves = {}
     if not os.path.isdir(calib_root):
         return curves
@@ -217,8 +274,121 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
     except Exception:
         return False
 
+#Live plotting for flow sanity check 
 
 class ExperimentGUI:
+    def start_live_plot_csv(self, window_seconds=30, sample_rate=10):
+        import threading
+
+        if getattr(self, 'live_plot_running', False):
+            return
+        self.live_plot_running = True
+        self._live_lock = threading.Lock()
+        max_points = int(window_seconds * sample_rate)
+        self._live_times = deque(maxlen=max_points)
+        self._live_flows = deque(maxlen=max_points)
+
+        # create toplevel and embed figure (must run on main thread)
+        self.live_win = tk.Toplevel(self.root)
+        self.live_win.title('Live Flow Rate')
+        self.live_fig = Figure(figsize=(6, 3.5))
+        self.live_ax = self.live_fig.add_subplot(111)
+        self.live_line, = self.live_ax.plot([], [], linewidth=2)
+        self.live_ax.set_xlabel('Time (s)')
+        self.live_ax.set_ylabel('Flow Rate (uL/min)')
+        self.live_ax.grid(True)
+        self.live_canvas = FigureCanvasTkAgg(self.live_fig, master=self.live_win)
+        self.live_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # state for reader
+        self._live_t0 = time.time()
+        self._live_last_len = 0
+        # if you want continuity across runs, set self.live_time_offset externally before calling
+        self._live_offset = float(getattr(self, 'live_time_offset', 0.0) or 0.0)
+
+        def safe_read_df(path):
+            try:
+                return pd.read_csv(path, sep=';', skiprows=[0])
+            except Exception:
+                try:
+                    return pd.read_csv(path)
+                except Exception:
+                    return None
+
+        def poll_loop():
+            while getattr(self, 'live_plot_running', False):
+                path = getattr(self, 'live_csv_path', None)
+                # detect when the monitored file changes and reset counters for a fresh read
+                prev = getattr(self, '_live_prev_path', None)
+                if path != prev:
+                    self._live_last_len = 0
+                    try:
+                        if hasattr(self, '_live_times') and len(self._live_times) > 0:
+                            # continue time axis from last plotted time
+                            self._live_offset = float(self._live_times[-1])
+                    except Exception:
+                        pass
+                    self._live_prev_path = path
+                if path and os.path.exists(path):
+                    try:
+                        df = safe_read_df(path)
+                        if df is not None and not df.empty:
+                            df.columns = df.columns.str.strip()
+                            tcol = next((c for c in df.columns if 'time' in c.lower()), None)
+                            fcol = next((c for c in df.columns if 'sf' in c.lower() or 'flow' in c.lower()), None)
+                            if tcol and fcol and tcol in df.columns and fcol in df.columns:
+                                df[tcol] = pd.to_numeric(df[tcol], errors='coerce')
+                                df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
+                                df = df.dropna(subset=[tcol, fcol])
+                                if not df.empty:
+                                    with self._live_lock:
+                                        nrows = len(df)
+                                        if nrows > self._live_last_len:
+                                            new = df.iloc[self._live_last_len:]
+                                            # normalize times for this file and add offset
+                                            try:
+                                                min_t = float(new[tcol].min())
+                                            except Exception:
+                                                min_t = 0.0
+                                            times_local = new[tcol].astype(float) - min_t + self._live_offset
+                                            for tt, ff in zip(times_local.values, new[fcol].astype(float).values):
+                                                self._live_times.append(float(tt))
+                                                self._live_flows.append(float(ff))
+                                            self._live_last_len = nrows
+                    except Exception:
+                        pass
+                time.sleep(max(0.05, 1.0 / max(1, sample_rate)))
+
+        def gui_update():
+            with self._live_lock:
+                if len(self._live_times) > 0:
+                    arrt = np.array(self._live_times)
+                    arrf = np.array(self._live_flows)
+                    self.live_line.set_data(arrt, arrf)
+                    tlast = float(arrt[-1])
+                    self.live_ax.set_xlim(max(0, tlast - window_seconds), tlast + 0.5)
+                    self.live_ax.set_ylim(np.nanmin(arrf) - 5, np.nanmax(arrf) + 5)
+                    self.live_canvas.draw_idle()
+            if getattr(self, 'live_plot_running', False):
+                self.root.after(int(1000 / max(1, sample_rate)), gui_update)
+
+        # start reader thread and GUI updater
+        self._live_thread = threading.Thread(target=poll_loop, daemon=True)
+        self._live_thread.start()
+        gui_update()
+
+    def stop_live_plot_csv(self):
+        self.live_plot_running = False
+        try:
+            if hasattr(self, '_live_thread'):
+                self._live_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'live_win'):
+                self.live_win.destroy()
+        except Exception:
+            pass
     def __init__(self, root):
         self.root = root
         root.title('Experiment Runner')
@@ -260,11 +430,14 @@ class ExperimentGUI:
 
         # Reservoir entries (3)
         self.reservoirs = []
-        for i in range(3):
+        num_res = 3
+        for i in range(num_res):
             row = 3 + i * 4
             ttk.Label(right, text=f'Reservoir{i+1} position (2-8):').grid(row=row, column=0, sticky='w')
             pos = tk.Entry(right)
-            pos.insert(0, str(2 + i))
+            # default position clamped to valid selector range (2-8)
+            pos_val = min(8, 2 + i)
+            pos.insert(0, str(pos_val))
             pos.grid(row=row, column=1, sticky='ew')
 
             ttk.Label(right, text=f'Reservoir{i+1} desired flow rate (uL/min):').grid(row=row+1, column=0, sticky='w')
@@ -287,23 +460,26 @@ class ExperimentGUI:
 
         # Result labels (populated after runs)
         self.result_vars = []
-        for i in range(3):
+        start_row = 3 + num_res * 4
+        for i in range(num_res):
             rv = tk.StringVar(value=f'Reservoir{i+1} Steady-State Avg: N/A (% difference from desired flow: N/A)')
-            ttk.Label(right, textvariable=rv).grid(row=17 + i, column=0, columnspan=2, sticky='w')
+            ttk.Label(right, textvariable=rv).grid(row=start_row + i, column=0, columnspan=2, sticky='w')
             self.result_vars.append(rv)
 
-        # Buttons
-        self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
-        self.compute_btn.grid(row=15, column=0, pady=6)
-        self.run_btn = ttk.Button(right, text='Run Experiment (3 reservoirs)', command=self.run_experiment)
-        self.run_btn.grid(row=15, column=1, pady=6)
-
-        # Status
+        # Status (above buttons)
         self.status_var = tk.StringVar(value='Ready')
-        ttk.Label(right, textvariable=self.status_var).grid(row=16, column=0, columnspan=2, sticky='w')
+        ttk.Label(right, textvariable=self.status_var).grid(row=start_row + num_res, column=0, columnspan=2, sticky='w')
+
+        # Buttons at the bottom
+        self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
+        self.compute_btn.grid(row=start_row + num_res + 1, column=0, pady=6)
+        self.run_btn = ttk.Button(right, text='Run Experiment (3 reservoirs)', command=self.run_experiment)
+        self.run_btn.grid(row=start_row + num_res + 1, column=1, pady=6)
 
         right.columnconfigure(1, weight=1)
         root.columnconfigure(1, weight=1)
+        self.live_csv_path = None
+        self.live_plot_running = False
 
     def on_curve_selected(self, event=None):
         name = self.curve_cb.get()
@@ -415,6 +591,9 @@ class ExperimentGUI:
         exp_name = self.output_label.get().strip() or timestamp
         out_dir = os.path.join(EXP_DATA_DIR, name, exp_name)
         os.makedirs(out_dir, exist_ok=True)
+        # ensure live plot is started on the main thread (creates GUI widgets)
+        if not getattr(self, 'live_plot_running', False):
+            self.start_live_plot_csv()
 
         threshold_pct = 10.0
         try:
@@ -470,6 +649,7 @@ class ExperimentGUI:
             # file inside ExperimentData/<curve> : <curve>_RES<pos>_<timestamp>.csv
             out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
             out_csv = out_csv.replace('\\', '/')
+            self.live_csv_path = out_csv
 
             # create script and run
             script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
@@ -637,6 +817,12 @@ class ExperimentGUI:
 
 def main():
     root = tk.Tk()
+    # default window size expanded to show 3 reservoirs and controls
+    try:
+        root.geometry('950x820')
+        root.minsize(800, 600)
+    except Exception:
+        pass
     app = ExperimentGUI(root)
     root.mainloop()
 
