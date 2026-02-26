@@ -223,24 +223,16 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
 
 #Live plotting for flow sanity check. Live-plot flow from the current active uProcess .csv log. Call once to start; it reschedules itself with root.after()
 class ExperimentGUI:
-    def live_plot_tick(self):
-        try:
-            interval_ms = int(1000 / max(1,self._live_sample_rate))
-            self.root.after(interval_ms, self.live_flow_tick)
-        except Exception:
-            return
-        
-        #pause toggle 
-        if self.live_paused.get():
-            return
-        
-        #continous time 
-        t_now = time.time()- self._live_t0
+    def live_plot_tick(self, window_seconds = 30, sample_rate = 10):
+        interval_ms = int(1000 / max(1, sample_rate))
+        self.root.after(interval_ms, lambda: self.live_plot_tick(window_seconds, sample_rate))
+
 
         #default flow when nothing is being run (i.e. brief pause between swithing experiments)
-        flow_now = 0.0
+        path = self.live_csv_path
 
-        path = getattr(self, "live_csv_path", None)
+        if not path or not os.path.exists(path):
+            return
        
         
         
@@ -250,62 +242,53 @@ class ExperimentGUI:
             self._live_debug_last_rowcount = 0
             print(f"\n Plotting from {path}")
 
-        if path or os.path.exists(path):
-            try:
-                #uprocess .csv files have sep as ;
-                df = pd.read_csv(path, sep = ';', skiprows = [0])
-
-                df.columns = df.columns.str.strip()
-                fcol = [c for c in df.columns if 'SF06' in c]
-                tcol = [c for c in df.columns if 'Time (s)' in c]
-                if not fcol or not tcol:
-                    # fallback: try first numeric columns
-                    numeric = df.select_dtypes(include=[np.number])
-                    if numeric.shape[1] < 2:
-                        return None, None, df
-                    tcol = numeric.columns[0]
-                    fcol = numeric.columns[1]
-                else:
-                    tcol = tcol[0]
-                    fcol = fcol[0]
-                df[tcol] = pd.to_numeric(df[tcol], errors='coerce')
-                df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
-                fcol = df[fcol].dropna()
-                if not fcol.empty:
-                    flow_now = float(fcol.iloc[-1])
-
-            except PermissionError:
-                return
-            except Exception:
-                pass
-
-        self._live_times.append(float(t_now))
-        self._live_flows.append(float(flow_now))
-
-        #redraw
         try:
-            x = np.array(self._live_times)
-            y = np.array(self._live_flows)
+            #uprocess .csv files have sep as ;
+            df = pd.read_csv(path, sep = ";", skiprows = [0])
+
+            df.columns = df.columns.str.strip()
+            fcol = [c for c in df.columns if 'SF06' in c]
+            tcol = [c for c in df.columns if 'Time (s)' in c]
+            if not fcol or not tcol:
+                # fallback: try first numeric columns
+                numeric = df.select_dtypes(include=[np.number])
+                if numeric.shape[1] < 2:
+                    return None, None, df
+                tcol = numeric.columns[0]
+                fcol = numeric.columns[1]
+            else:
+                tcol = tcol[0]
+                fcol = fcol[0]
+            df[tcol] = pd.to_numeric(df[tcol], errors='coerce')
+            df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
+            df = df.dropna(subset = [tcol, fcol])
+            if df.empty:
+                return
+
+            n = min(len(df), int(window_seconds * sample_rate))
+            x = df[tcol].to_numpy()[-n:]
+            y = df[fcol].to_numpy()[-n:]
+
+            if getattr(self, "_boundary_pending", False) and len(y) > 0:
+                y = y.copy()
+                y[0]=0
+                self._boundary_pending = False
 
             self.live_ax.clear()
-            self.live_ax.plot(x,y, linewidth = 2)
+            self.live_ax.plot(x,y,linewidth = 2)
             self.live_ax.set_xlabel("Time (s)")
             self.live_ax.set_ylabel("Flow (uL/min)")
             self.live_ax.set_title("Live Flow Rate")
             self.live_ax.grid(True)
 
-            if len(x):
-                self.live_ax.set_xlim(max(0, x[-1]-self._live_window_seconds), x[-1]+0.5)
-                lo, hi = float(np.min(y)), float(np.max(y))
-                if lo == hi:
-                    lo -= 1.0
-                    hi += 1.0
-                self.live_ax.set_ylim(lo-5, hi+5)
-            
             self.live_canvas.draw_idle()
+
+            
         
-        except Exception:
+        except PermissionError:
             return
+    def live_mark_boundary(self):
+        self._boundary_pending = True
 
     def __init__(self, root):
         self.root = root
@@ -395,25 +378,22 @@ class ExperimentGUI:
         self.run_btn.grid(row=start_row + num_res + 1, column=1, pady=6)
 
         #LIVE PLOTTING UI FOR FLOW AND PRESSURE
-        right.columnconfigure(1, weight=1)
-        root.columnconfigure(1, weight=1)
+        self.root.grid_columnconfigure(0, weight = 1)
+        self.root.grid_columnconfigure(1, weight = 1)
+        self.root.grid_rowconfigure(0, weight = 1)
+        self.root.grid_rowconfigure(1, weight = 1)
 
-        self.live_frame = ttk.LabelFrame(right, text = 'Live Flow Plot')
-
-        #beneath existing UI
-        LIVE_ROW = start_row + num_res + 2
-        self.live_frame.grid(row = LIVE_ROW, column = 0, columnspan = 2, sticky = 'nsew', pady = (10,0))
-
-        #let the plot expand so it's not squashed 
-        right.rowconfigure(LIVE_ROW, weight = 1)
-
-        #pause checkbox
-        self.live_paused = tk.BooleanVar(value = False)
-        ttk.Checkbutton(right, text = "Pause live plot", variable = self.live_paused).grid(row = LIVE_ROW -1, column = 0, columnspan = 2, sticky = "w", pady=(6,0)
+        self.live_frame = ttk.LabelFrame(self.root, text = 'Live Flow Plot')
+        self.live_frame.grid(
+            row = 1, column = 0, columnspan = 12,
+            sticky = "nsew",
+            padx = 12,
+            pady = (20,12)
         )
 
+
         #build the canvas
-        self.live_fig = Figure(figsize=(6.5,3.0))
+        self.live_fig = Figure(figsize=(10.0,3.2))
         self.live_ax = self.live_fig.add_subplot(111)
         self.live_ax.set_xlabel("Time (s)")
         self.live_ax.set_ylabel("Flow (uL/min)")
@@ -421,22 +401,16 @@ class ExperimentGUI:
         self.live_ax.grid(True)
 
         self.live_canvas = FigureCanvasTkAgg(self.live_fig, master = self.live_frame)
-        self.live_canvas.get_tk_widget().pack(fill="both", expand = True)
+        self.live_canvas.get_tk_widget().pack(fill="both", expand = True, padx =8, pady = 8)
         self.live_canvas.draw()
-
-        #continous time live plot buffers
-        self._live_t0 = time.time()
-        self._live_window_seconds = 30
-        self._live_sample_rate = 10
-        self._live_max_points = int(self._live_window_seconds * self._live_sample_rate)
-        self._live_times = deque(maxlen=self._live_max_points)
-        self._live_flows = deque(maxlen=self._live_max_points)
 
         #live plot states and debugging params state
         self.live_csv_path = None
+        self._boundary_pending = False
         self._live_prev_path = None
         self._live_debug_printed_header = False
         self._live_debug_last_rowcount = 0
+
 
         #start the loop (does nothing until the csv_path is set during the run)
         self.root.after(100, self.live_plot_tick)
@@ -608,6 +582,7 @@ class ExperimentGUI:
             # file inside ExperimentData/<curve> : <curve>_RES<pos>_<timestamp>.csv
             out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
             out_csv = out_csv.replace('\\', '/')
+            self.live_mark_boundary()
             self.live_csv_path = out_csv
 
             # create script and run
@@ -778,8 +753,8 @@ def main():
     root = tk.Tk()
     # default window size expanded to show 3 reservoirs and controls
     try:
-        root.geometry('950x820')
-        root.minsize(800, 600)
+        root.geometry('1400x1100')
+        root.minsize(1100, 800)
     except Exception:
         pass
     app = ExperimentGUI(root)
