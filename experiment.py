@@ -1,6 +1,6 @@
 #experiment.py
 #author: Kylen Patel
-#Last updated: 2/2/2026
+#Last updated: 2/23/2026
 import os
 import glob
 import time
@@ -17,59 +17,6 @@ from collections import deque
 from matplotlib.animation import FuncAnimation
 import threading
 
-'''
-#flow rate live plotting
-PORT = "COM5"
-BAUDRATE = 115200
-
-serial_port = ShdlcSerialPort(port = PORT, baudrate = BAUDRATE)
-serial_port._serial.timeout = 0.1
-connection = ShdlcConnection(serial_port)
-device = slf3s(connection, slave_address = 0)
-device.start(water = True)
-
-time.sleep(0.15)
-window_seconds = 30
-sample_rate = 10
-max_points = window_seconds * sample_rate
-
-times = deque(maxlen=max_points)
-flows = deque(maxlen=max_points)
-t0 = time.time()
-fig, ax1 = plt.subplots()
-flow_line = ax1.plot([], [], linewidth = 2)
-ax1.set_xlabel('Time (s)')
-ax1.set_ylabel('Flow Rate (uL/min)')
-ax1.grid(True)
-def update(frame):
-    try:
-        flow, temp, flag = device.get_last()
-    except:
-        return flow_line
-    t = time.time() - t0
-    
-    
-    times.append(t)
-    flows.append(flow)
-    flow_line.set_data(times,flows)
-    ax1.set_xlim(max(0,t-window_seconds),t+0.5)
-    if flows:
-        ax1.set_ylim(min(flows)-5, max(flows)+5)
-    
-    return flow_line
-ani = FuncAnimation(
-    fig,
-    update,
-    interval = 100,
-    blit = False
-)
-try:
-    plt.show()
-
-finally:
-    device.stop()
-    serial_port.close()
-'''
 
 #Paths (adjust if needed)
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__)))
@@ -274,121 +221,92 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
     except Exception:
         return False
 
-#Live plotting for flow sanity check 
-
+#Live plotting for flow sanity check. Live-plot flow from the current active uProcess .csv log. Call once to start; it reschedules itself with root.after()
 class ExperimentGUI:
-    def start_live_plot_csv(self, window_seconds=30, sample_rate=10):
-        import threading
-
-        if getattr(self, 'live_plot_running', False):
+    def live_plot_tick(self):
+        try:
+            interval_ms = int(1000 / max(1,self._live_sample_rate))
+            self.root.after(interval_ms, self.live_flow_tick)
+        except Exception:
             return
-        self.live_plot_running = True
-        self._live_lock = threading.Lock()
-        max_points = int(window_seconds * sample_rate)
-        self._live_times = deque(maxlen=max_points)
-        self._live_flows = deque(maxlen=max_points)
+        
+        #pause toggle 
+        if self.live_paused.get():
+            return
+        
+        #continous time 
+        t_now = time.time()- self._live_t0
 
-        # create toplevel and embed figure (must run on main thread)
-        self.live_win = tk.Toplevel(self.root)
-        self.live_win.title('Live Flow Rate')
-        self.live_fig = Figure(figsize=(6, 3.5))
-        self.live_ax = self.live_fig.add_subplot(111)
-        self.live_line, = self.live_ax.plot([], [], linewidth=2)
-        self.live_ax.set_xlabel('Time (s)')
-        self.live_ax.set_ylabel('Flow Rate (uL/min)')
-        self.live_ax.grid(True)
-        self.live_canvas = FigureCanvasTkAgg(self.live_fig, master=self.live_win)
-        self.live_canvas.get_tk_widget().pack(fill='both', expand=True)
+        #default flow when nothing is being run (i.e. brief pause between swithing experiments)
+        flow_now = 0.0
 
-        # state for reader
-        self._live_t0 = time.time()
-        self._live_last_len = 0
-        # if you want continuity across runs, set self.live_time_offset externally before calling
-        self._live_offset = float(getattr(self, 'live_time_offset', 0.0) or 0.0)
+        path = getattr(self, "live_csv_path", None)
+       
+        
+        
+        if getattr(self,"_live_prev_path", None) != path:
+            self._live_prev_path = path
+            self._live_debug_printed_header = False
+            self._live_debug_last_rowcount = 0
+            print(f"\n Plotting from {path}")
 
-        def safe_read_df(path):
+        if path or os.path.exists(path):
             try:
-                return pd.read_csv(path, sep=';', skiprows=[0])
+                #uprocess .csv files have sep as ;
+                df = pd.read_csv(path, sep = ';', skiprows = [0])
+
+                df.columns = df.columns.str.strip()
+                fcol = [c for c in df.columns if 'SF06' in c]
+                tcol = [c for c in df.columns if 'Time (s)' in c]
+                if not fcol or not tcol:
+                    # fallback: try first numeric columns
+                    numeric = df.select_dtypes(include=[np.number])
+                    if numeric.shape[1] < 2:
+                        return None, None, df
+                    tcol = numeric.columns[0]
+                    fcol = numeric.columns[1]
+                else:
+                    tcol = tcol[0]
+                    fcol = fcol[0]
+                df[tcol] = pd.to_numeric(df[tcol], errors='coerce')
+                df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
+                fcol = df[fcol].dropna()
+                if not fcol.empty:
+                    flow_now = float(fcol.iloc[-1])
+
+            except PermissionError:
+                return
             except Exception:
-                try:
-                    return pd.read_csv(path)
-                except Exception:
-                    return None
+                pass
 
-        def poll_loop():
-            while getattr(self, 'live_plot_running', False):
-                path = getattr(self, 'live_csv_path', None)
-                # detect when the monitored file changes and reset counters for a fresh read
-                prev = getattr(self, '_live_prev_path', None)
-                if path != prev:
-                    self._live_last_len = 0
-                    try:
-                        if hasattr(self, '_live_times') and len(self._live_times) > 0:
-                            # continue time axis from last plotted time
-                            self._live_offset = float(self._live_times[-1])
-                    except Exception:
-                        pass
-                    self._live_prev_path = path
-                if path and os.path.exists(path):
-                    try:
-                        df = safe_read_df(path)
-                        if df is not None and not df.empty:
-                            df.columns = df.columns.str.strip()
-                            tcol = next((c for c in df.columns if 'time' in c.lower()), None)
-                            fcol = next((c for c in df.columns if 'sf' in c.lower() or 'flow' in c.lower()), None)
-                            if tcol and fcol and tcol in df.columns and fcol in df.columns:
-                                df[tcol] = pd.to_numeric(df[tcol], errors='coerce')
-                                df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
-                                df = df.dropna(subset=[tcol, fcol])
-                                if not df.empty:
-                                    with self._live_lock:
-                                        nrows = len(df)
-                                        if nrows > self._live_last_len:
-                                            new = df.iloc[self._live_last_len:]
-                                            # normalize times for this file and add offset
-                                            try:
-                                                min_t = float(new[tcol].min())
-                                            except Exception:
-                                                min_t = 0.0
-                                            times_local = new[tcol].astype(float) - min_t + self._live_offset
-                                            for tt, ff in zip(times_local.values, new[fcol].astype(float).values):
-                                                self._live_times.append(float(tt))
-                                                self._live_flows.append(float(ff))
-                                            self._live_last_len = nrows
-                    except Exception:
-                        pass
-                time.sleep(max(0.05, 1.0 / max(1, sample_rate)))
+        self._live_times.append(float(t_now))
+        self._live_flows.append(float(flow_now))
 
-        def gui_update():
-            with self._live_lock:
-                if len(self._live_times) > 0:
-                    arrt = np.array(self._live_times)
-                    arrf = np.array(self._live_flows)
-                    self.live_line.set_data(arrt, arrf)
-                    tlast = float(arrt[-1])
-                    self.live_ax.set_xlim(max(0, tlast - window_seconds), tlast + 0.5)
-                    self.live_ax.set_ylim(np.nanmin(arrf) - 5, np.nanmax(arrf) + 5)
-                    self.live_canvas.draw_idle()
-            if getattr(self, 'live_plot_running', False):
-                self.root.after(int(1000 / max(1, sample_rate)), gui_update)
-
-        # start reader thread and GUI updater
-        self._live_thread = threading.Thread(target=poll_loop, daemon=True)
-        self._live_thread.start()
-        gui_update()
-
-    def stop_live_plot_csv(self):
-        self.live_plot_running = False
+        #redraw
         try:
-            if hasattr(self, '_live_thread'):
-                self._live_thread.join(timeout=1.0)
+            x = np.array(self._live_times)
+            y = np.array(self._live_flows)
+
+            self.live_ax.clear()
+            self.live_ax.plot(x,y, linewidth = 2)
+            self.live_ax.set_xlabel("Time (s)")
+            self.live_ax.set_ylabel("Flow (uL/min)")
+            self.live_ax.set_title("Live Flow Rate")
+            self.live_ax.grid(True)
+
+            if len(x):
+                self.live_ax.set_xlim(max(0, x[-1]-self._live_window_seconds), x[-1]+0.5)
+                lo, hi = float(np.min(y)), float(np.max(y))
+                if lo == hi:
+                    lo -= 1.0
+                    hi += 1.0
+                self.live_ax.set_ylim(lo-5, hi+5)
+            
+            self.live_canvas.draw_idle()
+        
         except Exception:
-            pass
-        try:
-            if hasattr(self, 'live_win'):
-                self.live_win.destroy()
-        except Exception:
-            pass
+            return
+
     def __init__(self, root):
         self.root = root
         root.title('Experiment Runner')
@@ -476,10 +394,52 @@ class ExperimentGUI:
         self.run_btn = ttk.Button(right, text='Run Experiment (3 reservoirs)', command=self.run_experiment)
         self.run_btn.grid(row=start_row + num_res + 1, column=1, pady=6)
 
+        #LIVE PLOTTING UI FOR FLOW AND PRESSURE
         right.columnconfigure(1, weight=1)
         root.columnconfigure(1, weight=1)
+
+        self.live_frame = ttk.LabelFrame(right, text = 'Live Flow Plot')
+
+        #beneath existing UI
+        LIVE_ROW = start_row + num_res + 2
+        self.live_frame.grid(row = LIVE_ROW, column = 0, columnspan = 2, sticky = 'nsew', pady = (10,0))
+
+        #let the plot expand so it's not squashed 
+        right.rowconfigure(LIVE_ROW, weight = 1)
+
+        #pause checkbox
+        self.live_paused = tk.BooleanVar(value = False)
+        ttk.Checkbutton(right, text = "Pause live plot", variable = self.live_paused).grid(row = LIVE_ROW -1, column = 0, columnspan = 2, sticky = "w", pady=(6,0)
+        )
+
+        #build the canvas
+        self.live_fig = Figure(figsize=(6.5,3.0))
+        self.live_ax = self.live_fig.add_subplot(111)
+        self.live_ax.set_xlabel("Time (s)")
+        self.live_ax.set_ylabel("Flow (uL/min)")
+        self.live_ax.set_title("Live Flow")
+        self.live_ax.grid(True)
+
+        self.live_canvas = FigureCanvasTkAgg(self.live_fig, master = self.live_frame)
+        self.live_canvas.get_tk_widget().pack(fill="both", expand = True)
+        self.live_canvas.draw()
+
+        #continous time live plot buffers
+        self._live_t0 = time.time()
+        self._live_window_seconds = 30
+        self._live_sample_rate = 10
+        self._live_max_points = int(self._live_window_seconds * self._live_sample_rate)
+        self._live_times = deque(maxlen=self._live_max_points)
+        self._live_flows = deque(maxlen=self._live_max_points)
+
+        #live plot states and debugging params state
         self.live_csv_path = None
-        self.live_plot_running = False
+        self._live_prev_path = None
+        self._live_debug_printed_header = False
+        self._live_debug_last_rowcount = 0
+
+        #start the loop (does nothing until the csv_path is set during the run)
+        self.root.after(100, self.live_plot_tick)
 
     def on_curve_selected(self, event=None):
         name = self.curve_cb.get()
@@ -592,8 +552,7 @@ class ExperimentGUI:
         out_dir = os.path.join(EXP_DATA_DIR, name, exp_name)
         os.makedirs(out_dir, exist_ok=True)
         # ensure live plot is started on the main thread (creates GUI widgets)
-        if not getattr(self, 'live_plot_running', False):
-            self.start_live_plot_csv()
+
 
         threshold_pct = 10.0
         try:
