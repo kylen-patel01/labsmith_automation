@@ -223,16 +223,29 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
 
 #Live plotting for flow sanity check. Live-plot flow from the current active uProcess .csv log. Call once to start; it reschedules itself with root.after()
 class ExperimentGUI:
+
+    '''
     def live_plot_tick(self, window_seconds = 30, sample_rate = 10):
         interval_ms = int(1000 / max(1, sample_rate))
         self.root.after(interval_ms, lambda: self.live_plot_tick(window_seconds, sample_rate))
-
-
-        #default flow when nothing is being run (i.e. brief pause between swithing experiments)
         path = self.live_csv_path
 
         if not path or not os.path.exists(path):
-            return
+            t_end = getattr(self, "_live_last_time", 0.0)
+            t_start = max(0.0, t_end - float(window_seconds))
+            x = np.linspace(t_start, t_end, max(2, int(window_seconds * sample_rate)))
+            y = np.zeros_like(x)
+            self.live_ax.clear()
+            self.live_ax.plot(x,y,linewidth = 2)
+            self.live_ax.set_xlabel("Time (s)")
+            self.live_ax.set_ylabel("Flow (uL/min)")
+            self.live_ax.set_title("Live Flow Rate")
+            self.live_ax.grid(True)
+            try:
+                self.live_canvas.draw_idle()
+            except Exception: 
+                pass
+            return 
        
         
         
@@ -241,7 +254,6 @@ class ExperimentGUI:
             self._live_debug_printed_header = False
             self._live_debug_last_rowcount = 0
             print(f"\n Plotting from {path}")
-
         try:
             #uprocess .csv files have sep as ;
             df = pd.read_csv(path, sep = ";", skiprows = [0])
@@ -263,16 +275,29 @@ class ExperimentGUI:
             df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
             df = df.dropna(subset = [tcol, fcol])
             if df.empty:
-                return
+                raise ValueError ("no valid rows in live plot")
 
+            #time-continuity; if new file, shift by offset; otherwise add offset if starts near 0
+
+            new_file = getattr(self, "_live_prev_path", None) != path
+            if new_file: 
+                self._live_prev_path = path 
+                file_min = float(df[tcol].min())
+                df[tcol] = df[tcol] - file_min + getattr(self, "_live_time_offset", 0.0)
+            else:
+                if float(df[tcol].min()) < 1.0:
+                    df[tcol] = df[tcol] + getattr(self, "_live_time_offset", 0.0)
+            
+            #update offsets
+            file_max_shifted = float(df[tcol].max())
+            if file_max_shifted > getattr(self, "_live_last_time", 0.0):
+                self._live_last_time = file_max_shifted
+                self._live_time_offset = self._live_last_time + 0.01
+            tvals = df[tcol].to_numpy(); fvals = df[fcol].to_numpy()
+            order = np.argsort(tvals); tvals = tvals[order]; fvals = fvals[order]
             n = min(len(df), int(window_seconds * sample_rate))
-            x = df[tcol].to_numpy()[-n:]
-            y = df[fcol].to_numpy()[-n:]
-
-            if getattr(self, "_boundary_pending", False) and len(y) > 0:
-                y = y.copy()
-                y[0]=0
-                self._boundary_pending = False
+            x = tvals[-n:]
+            y = fvals[-n:]
 
             self.live_ax.clear()
             self.live_ax.plot(x,y,linewidth = 2)
@@ -280,15 +305,39 @@ class ExperimentGUI:
             self.live_ax.set_ylabel("Flow (uL/min)")
             self.live_ax.set_title("Live Flow Rate")
             self.live_ax.grid(True)
-
-            self.live_canvas.draw_idle()
+            try:
+                self.live_canvas.draw_idle()
+            except Exception:
+                pass
 
             
         
         except PermissionError:
-            return
-    def live_mark_boundary(self):
-        self._boundary_pending = True
+            t_end = getattr(self, "_live_last_time", 0.0)
+            t_start = max(0.0, t_end - float(window_seconds))
+            x = np.linspace(t_start, t_end, max(2, int(window_seconds * sample_rate)))
+            y = np.zeros_like(x)
+            self.live_ax.clear()
+            self.live_ax.plot(x,y,linewidth = 2)
+            self.live_ax.set_title("Live Flow file locked")
+            try:
+                self.live_canvas.draw_idle()
+            except Exception:
+                pass
+        
+        except Exception:
+            t_end = getattr(self, "_live_last_time", 0.0)
+            t_start = max(0.0, t_end - float(window_seconds))
+            x = np.linspace(t_start, t_end, max(2, int(window_seconds * sample_rate)))
+            y = np.zeros_like(x)
+            self.live_ax.clear()
+            self.live_ax.plot(x,y,linewidth = 2)
+            self.live_ax.set_title("Live Flow waiting")
+            try:
+                self.live_canvas.draw_idle()
+            except Exception:
+                pass
+    '''
 
     def __init__(self, root):
         self.root = root
@@ -377,6 +426,7 @@ class ExperimentGUI:
         self.run_btn = ttk.Button(right, text='Run Experiment (3 reservoirs)', command=self.run_experiment)
         self.run_btn.grid(row=start_row + num_res + 1, column=1, pady=6)
 
+        '''
         #LIVE PLOTTING UI FOR FLOW AND PRESSURE
         self.root.grid_columnconfigure(0, weight = 1)
         self.root.grid_columnconfigure(1, weight = 1)
@@ -391,7 +441,7 @@ class ExperimentGUI:
             pady = (20,12)
         )
 
-
+    
         #build the canvas
         self.live_fig = Figure(figsize=(10.0,3.2))
         self.live_ax = self.live_fig.add_subplot(111)
@@ -406,7 +456,8 @@ class ExperimentGUI:
 
         #live plot states and debugging params state
         self.live_csv_path = None
-        self._boundary_pending = False
+        self._live_time_offset = 0.0
+        self._live_last_time = 0.0
         self._live_prev_path = None
         self._live_debug_printed_header = False
         self._live_debug_last_rowcount = 0
@@ -414,6 +465,7 @@ class ExperimentGUI:
 
         #start the loop (does nothing until the csv_path is set during the run)
         self.root.after(100, self.live_plot_tick)
+    '''
 
     def on_curve_selected(self, event=None):
         name = self.curve_cb.get()
@@ -582,8 +634,7 @@ class ExperimentGUI:
             # file inside ExperimentData/<curve> : <curve>_RES<pos>_<timestamp>.csv
             out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
             out_csv = out_csv.replace('\\', '/')
-            self.live_mark_boundary()
-            self.live_csv_path = out_csv
+            # self.live_csv_path = out_csv
 
             # create script and run
             script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
@@ -710,6 +761,7 @@ class ExperimentGUI:
                         if not dfi.empty:
                             min_t = float(dfi[tcol].min())
                             dfi[tcol] = dfi[tcol] - min_t + cumulative_offset
+                            dfi["Total_Time"] = dfi[tcol]
                             cumulative_offset = float(dfi[tcol].max())
                         # remember a canonical time column name (use first file's name)
                         if time_col_name is None:
