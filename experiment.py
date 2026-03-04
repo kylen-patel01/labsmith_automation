@@ -224,36 +224,35 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
 #Live plotting for flow sanity check. Live-plot flow from the current active uProcess .csv log. Call once to start; it reschedules itself with root.after()
 class ExperimentGUI:
 
-    '''
     def live_plot_tick(self, window_seconds = 30, sample_rate = 10):
         interval_ms = int(1000 / max(1, sample_rate))
         self.root.after(interval_ms, lambda: self.live_plot_tick(window_seconds, sample_rate))
         path = self.live_csv_path
 
-        if not path or not os.path.exists(path):
-            t_end = getattr(self, "_live_last_time", 0.0)
+        def draw_zeros(title = "live flow waiting"):
+            t_end = float(getattr(self, "_live_last_time", 0.0))
+            if t_end <= 0:
+                t_end = float(window_seconds)
+                self._live_last_time = t_end
+            
             t_start = max(0.0, t_end - float(window_seconds))
-            x = np.linspace(t_start, t_end, max(2, int(window_seconds * sample_rate)))
+            x = np.linspace(t_start, t_end, max(2, int(window_seconds*sample_rate)))
             y = np.zeros_like(x)
+
             self.live_ax.clear()
             self.live_ax.plot(x,y,linewidth = 2)
-            self.live_ax.set_xlabel("Time (s)")
-            self.live_ax.set_ylabel("Flow (uL/min)")
-            self.live_ax.set_title("Live Flow Rate")
+            self.live_ax.set_xlabel("time (s)")
+            self.live_ax.set_ylabel("Flow rate (uL/min)")
+            self.live_ax.set_title(title)
             self.live_ax.grid(True)
-            try:
-                self.live_canvas.draw_idle()
-            except Exception: 
-                pass
-            return 
-       
+            self.live_canvas.draw_idle()
+
+            self._live_last_time = t_end + (1.0/max(1,sample_rate))
         
-        
-        if getattr(self,"_live_prev_path", None) != path:
-            self._live_prev_path = path
-            self._live_debug_printed_header = False
-            self._live_debug_last_rowcount = 0
-            print(f"\n Plotting from {path}")
+
+        if not path or not os.path.exists(path):
+            draw_zeros("Live Flow (no file)")
+            return
         try:
             #uprocess .csv files have sep as ;
             df = pd.read_csv(path, sep = ";", skiprows = [0])
@@ -275,29 +274,23 @@ class ExperimentGUI:
             df[fcol] = pd.to_numeric(df[fcol], errors='coerce')
             df = df.dropna(subset = [tcol, fcol])
             if df.empty:
-                raise ValueError ("no valid rows in live plot")
+                draw_zeros("Live flow (empty)")
+                return
 
-            #time-continuity; if new file, shift by offset; otherwise add offset if starts near 0
-
-            new_file = getattr(self, "_live_prev_path", None) != path
-            if new_file: 
-                self._live_prev_path = path 
-                file_min = float(df[tcol].min())
-                df[tcol] = df[tcol] - file_min + getattr(self, "_live_time_offset", 0.0)
-            else:
-                if float(df[tcol].min()) < 1.0:
-                    df[tcol] = df[tcol] + getattr(self, "_live_time_offset", 0.0)
+            if getattr(self, "_live_prev_path", None) != path:
+                self._live_prev_path = path
+                self._live_time_offset = getattr(self, "_live_last_time",0.0)
             
-            #update offsets
-            file_max_shifted = float(df[tcol].max())
-            if file_max_shifted > getattr(self, "_live_last_time", 0.0):
-                self._live_last_time = file_max_shifted
-                self._live_time_offset = self._live_last_time + 0.01
-            tvals = df[tcol].to_numpy(); fvals = df[fcol].to_numpy()
-            order = np.argsort(tvals); tvals = tvals[order]; fvals = fvals[order]
-            n = min(len(df), int(window_seconds * sample_rate))
-            x = tvals[-n:]
-            y = fvals[-n:]
+            tvals = df[tcol].to_numpy(dtype = float)
+            fvals = df[fcol].to_numpy(dtype = float)
+            order = np.argsort(tvals)
+            tvals, fvals = tvals[order], fvals[order]
+
+            tvals = tvals - tvals.min() + self._live_time_offset
+            self._live_last_time = float(tvals[-1])
+
+            n = min(len(tvals), max(2, int(window_seconds * sample_rate)))
+            x, y = tvals[-n:], fvals[-n:]
 
             self.live_ax.clear()
             self.live_ax.plot(x,y,linewidth = 2)
@@ -305,39 +298,12 @@ class ExperimentGUI:
             self.live_ax.set_ylabel("Flow (uL/min)")
             self.live_ax.set_title("Live Flow Rate")
             self.live_ax.grid(True)
-            try:
-                self.live_canvas.draw_idle()
-            except Exception:
-                pass
-
-            
-        
+            self.live_canvas.draw_idle()
         except PermissionError:
-            t_end = getattr(self, "_live_last_time", 0.0)
-            t_start = max(0.0, t_end - float(window_seconds))
-            x = np.linspace(t_start, t_end, max(2, int(window_seconds * sample_rate)))
-            y = np.zeros_like(x)
-            self.live_ax.clear()
-            self.live_ax.plot(x,y,linewidth = 2)
-            self.live_ax.set_title("Live Flow file locked")
-            try:
-                self.live_canvas.draw_idle()
-            except Exception:
-                pass
-        
+            draw_zeros("Live flow (file locked)")
         except Exception:
-            t_end = getattr(self, "_live_last_time", 0.0)
-            t_start = max(0.0, t_end - float(window_seconds))
-            x = np.linspace(t_start, t_end, max(2, int(window_seconds * sample_rate)))
-            y = np.zeros_like(x)
-            self.live_ax.clear()
-            self.live_ax.plot(x,y,linewidth = 2)
-            self.live_ax.set_title("Live Flow waiting")
-            try:
-                self.live_canvas.draw_idle()
-            except Exception:
-                pass
-    '''
+            draw_zeros("Live flow (waiting)")
+
 
     def __init__(self, root):
         self.root = root
@@ -426,7 +392,7 @@ class ExperimentGUI:
         self.run_btn = ttk.Button(right, text='Run Experiment (3 reservoirs)', command=self.run_experiment)
         self.run_btn.grid(row=start_row + num_res + 1, column=1, pady=6)
 
-        '''
+        
         #LIVE PLOTTING UI FOR FLOW AND PRESSURE
         self.root.grid_columnconfigure(0, weight = 1)
         self.root.grid_columnconfigure(1, weight = 1)
@@ -459,13 +425,9 @@ class ExperimentGUI:
         self._live_time_offset = 0.0
         self._live_last_time = 0.0
         self._live_prev_path = None
-        self._live_debug_printed_header = False
-        self._live_debug_last_rowcount = 0
-
-
         #start the loop (does nothing until the csv_path is set during the run)
         self.root.after(100, self.live_plot_tick)
-    '''
+    
 
     def on_curve_selected(self, event=None):
         name = self.curve_cb.get()
@@ -590,105 +552,120 @@ class ExperimentGUI:
         run_params = []
 
         # Open a single pipe and reuse it for runs
-        try:
-            pipe = uProcess.OpenCommandPipe()
-        except Exception as e:
-            messagebox.showerror('Error', f'Could not open uProcess pipe: {e}')
-            return
-
-        for i, r in enumerate(self.reservoirs):
+        pipe = None
+        last_err = None
+        for _ in range (10):
             try:
-                desired_flow = float(r['flow'].get())
-                vol = float(r['vol'].get())
-                pos = int(r['pos'].get())
-            except Exception:
-                messagebox.showerror('Error', f'Invalid inputs for reservoir {i+1}')
-                return
-
-            # enforce valid reservoir positions 2-8
-            if pos < 2 or pos > 8:
-                messagebox.showerror('Error', f'Reservoir position for Res{i+1} must be between 2 and 8')
-                return
-
-            if slope == 0:
-                pressure = 0.0
-            else:
-                pressure = (desired_flow - intercept) / slope
-
-            if desired_flow <= 0:
-                disp_time = 0
-            else:
-                disp_time = (vol / desired_flow) * 60.0
-
-            # update labels for this reservoir before running
-            if slope == 0:
-                r['pressure_lbl'].set('Pressure: N/A')
-            else:
-                r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa')
-            r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
-
-            run_params.append({'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos, 'out_csv': None})
-
-            # file naming: Experiment_{calibfolder}_RES{pos}_{timestamp}.csv
-            base_label = self.output_label.get().strip() or 'Experiment'
-            # file inside ExperimentData/<curve> : <curve>_RES<pos>_<timestamp>.csv
-            out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
-            out_csv = out_csv.replace('\\', '/')
-            # self.live_csv_path = out_csv
-
-            # create script and run
-            script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
-            script_text = script_text.replace('\x00', '')
-            script_text = script_text.replace('\n', '\r\n')
-
-            try:
-                self.status_var.set(f'Running reservoir {i+1} at pos {pos}...')
-                self.root.update()
-                uProcess.SetScript(pipe, script_text)
-                uProcess.Run(pipe)
-                while uProcess.IsRunning(pipe):
-                    time.sleep(0.5)
-                    self.root.update()
+                pipe = uProcess.OpenCommandPipe()
+                break
             except Exception as e:
-                messagebox.showerror('Error', f'Run failed for reservoir {i+1}: {e}')
+                last_err = e
+                time.sleep(0.3)
+            if pipe is None:
+                messagebox.showerror("Error", f'could not open uProcess pipe: {last_err}')
                 return
 
-            # after run, record csv path for later processing
-            individual_csvs.append(out_csv)
-            # debug: log the saved csv path
-            try:
-                print(f"Run {i+1}: saved output CSV -> {out_csv}")
-            except Exception:
-                pass
-            run_params[-1]['out_csv'] = out_csv
-            # try to read basic columns for plotting later
-            try:
-                tcol, fcol, df = extract_flow(out_csv)
-                cols = (tcol, fcol)
-            except Exception:
-                cols = None
-                df = None
+        self._live_prev_path = None
+        self._live_last_time = 0.0
+        self._live_time_offset = 0.0
+        try:
+            for i, r in enumerate(self.reservoirs):
+                try:
+                    desired_flow = float(r['flow'].get())
+                    vol = float(r['vol'].get())
+                    pos = int(r['pos'].get())
+                except Exception:
+                    messagebox.showerror('Error', f'Invalid inputs for reservoir {i+1}')
+                    return
 
-            # no threshold check here; will perform after all runs
+                # enforce valid reservoir positions 2-8
+                if pos < 2 or pos > 8:
+                    messagebox.showerror('Error', f'Reservoir position for Res{i+1} must be between 2 and 8')
+                    return
 
-            # plot single-run overlay (flow + pressure)
-            if isinstance(cols, tuple) and df is not None:
-                tcol, fcol = cols
-                # detect pressure column
-                pressure_col = None
-                for c in df.columns:
-                    cl = c.lower()
-                    if 'press' in cl or 'kpa' in cl:
-                        pressure_col = c
-                        break
-                fn = out_csv.replace('.csv', '.png')
-                plot_overlay(df, tcol, fcol, pressure_col, fn, title=f'Res{i+1} trace')
+                if slope == 0:
+                    pressure = 0.0
+                else:
+                    pressure = (desired_flow - intercept) / slope
+
+                if desired_flow <= 0:
+                    disp_time = 0
+                else:
+                    disp_time = (vol / desired_flow) * 60.0
+
+                # update labels for this reservoir before running
+                if slope == 0:
+                    r['pressure_lbl'].set('Pressure: N/A')
+                else:
+                    r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa')
+                r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
+
+                run_params.append({'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos, 'out_csv': None})
+
+                # file naming: Experiment_{calibfolder}_RES{pos}_{timestamp}.csv
+                base_label = self.output_label.get().strip() or 'Experiment'
+                # file inside ExperimentData/<curve> : <curve>_RES<pos>_<timestamp>.csv
+                out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
+                out_csv = out_csv.replace('\\', '/')
+                self.live_csv_path = out_csv
+                self._live_prev_path = None
+
+                # create script and run
+                script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
+                script_text = script_text.replace('\x00', '')
+                script_text = script_text.replace('\n', '\r\n')
+
+                try:
+                    self.status_var.set(f'Running reservoir {i+1} at pos {pos}...')
+                    self.root.update()
+                    uProcess.SetScript(pipe, script_text)
+                    uProcess.Run(pipe)
+                    while uProcess.IsRunning(pipe):
+                        time.sleep(0.2)
+                        self.root.update_idletasks()
+                except Exception as e:
+                    messagebox.showerror('Error', f'Run failed for reservoir {i+1}: {e}')
+                    return
+
+                # after run, record csv path for later processing
+                individual_csvs.append(out_csv)
+                # debug: log the saved csv path
+                try:
+                    print(f"Run {i+1}: saved output CSV -> {out_csv}")
+                except Exception:
+                    pass
+                run_params[-1]['out_csv'] = out_csv
+                # try to read basic columns for plotting later
+                try:
+                    tcol, fcol, df = extract_flow(out_csv)
+                    cols = (tcol, fcol)
+                except Exception:
+                    cols = None
+                    df = None
+
+                # no threshold check here; will perform after all runs
+
+                # plot single-run overlay (flow + pressure)
+                if isinstance(cols, tuple) and df is not None:
+                    tcol, fcol = cols
+                    # detect pressure column
+                    pressure_col = None
+                    for c in df.columns:
+                        cl = c.lower()
+                        if 'press' in cl or 'kpa' in cl:
+                            pressure_col = c
+                            break
+                    fn = out_csv.replace('.csv', '.png')
+                    plot_overlay(df, tcol, fcol, pressure_col, fn, title=f'Res{i+1} trace')
 
         # close pipe
-        try:
-            uProcess.CloseCommandPipe(pipe)
-        except Exception:
-            pass
+        finally:
+            try:
+                if pipe is not None:
+                    uProcess.CloseCommandPipe(pipe)
+            except Exception:
+                pass
+            self.live_csv_path = None
 
         # after all runs: compute steady-state means and percent differences
         exceeded = []
@@ -799,7 +776,6 @@ class ExperimentGUI:
             except Exception as e:
                 messagebox.showwarning('Warning', f'Could not combine CSVs: {e}')
                 self.status_var.set('Done with warnings')
-
 
 def main():
     root = tk.Tk()
