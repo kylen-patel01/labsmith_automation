@@ -198,6 +198,42 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, t
             return None
     return float(np.mean(sample[flow_col]))
 
+def downsample_by_time_nearest(df, time_col, target_hz):
+    if df is None or df.empty or target_hz is None or target_hz <= 0:
+        return df
+    
+    dfo = df.copy()
+    dfo[time_col] = pd.to_numeric(dfo[time_col], errors = 'coerce')
+    dfo = dfo.dropna(subset = [time_col])
+    dfo = dfo.sort_values(time_col).reset_index(drop= True)
+
+    if dfo.empty():
+        return dfo
+    
+    target_hz = max(1,min(10,int(target_hz))) #change to max uprocess sample rate as well
+
+    if target_hz == 10:
+        return dfo.copy()
+    
+    dt = 1.0/float(target_hz) #time step
+    tvals = dfo[time_col].to_numpy(dtype = float)
+
+    tmin = float(tvals[0])
+    tmax = float(tvals[-1])
+
+    target_times = np.arange(tmin, tmax + 0.5 * dt, dt)
+    
+    chosen_idx = []
+    used = set()
+
+    for tt in target_times:
+        idx = int(np.argmin(np.abs(tvals-tt)))
+        if idx not in used:
+            chosen_idx.append(idx)
+            used.add(idx)
+    
+    chosen_idx = sorted(chosen_idx)
+    return dfo.iloc[chosen_idx].reset_index(drop = True)
 
 def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
     try:
@@ -260,16 +296,21 @@ class ExperimentGUI:
         self.threshold_entry.insert(0, '10')
         self.threshold_entry.grid(row=1, column=1, sticky='ew')
 
-        ttk.Label(right, text='Experiment name:').grid(row=2, column=0, sticky='w')
+        ttk.Label(right, text = 'Sample Rate (Hz): ').grid(row = 2, column = 0, sticky = 'w')
+        self.sample_rate_entry = tk.Entry(right)
+        self.sample_rate_entry.insert(0, '10')
+        self.sample_rate_entry.grid(row = 2, column = 1, sticky = 'ew')
+
+        ttk.Label(right, text='Experiment name:').grid(row=3, column=0, sticky='w')
         self.output_label = tk.Entry(right)
-        self.output_label.insert(0, 'exp1')
-        self.output_label.grid(row=2, column=1, sticky='ew')
+        self.output_label.insert(0, 'experiment_name')
+        self.output_label.grid(row=3, column=1, sticky='ew')
 
         # Reservoir entries (3)
         self.reservoirs = []
         num_res = 3
         for i in range(num_res):
-            row = 3 + i * 4
+            row = 4 + i * 4
             ttk.Label(right, text=f'Reservoir{i+1} position (2-8):').grid(row=row, column=0, sticky='w')
             pos = tk.Entry(right)
             # default position clamped to valid selector range (2-8)
@@ -297,7 +338,7 @@ class ExperimentGUI:
 
         # Result labels (populated after runs)
         self.result_vars = []
-        start_row = 3 + num_res * 4
+        start_row = 4 + num_res * 4
         for i in range(num_res):
             rv = tk.StringVar(value=f'Reservoir{i+1} Steady-State Avg: N/A (% difference from desired flow: N/A)')
             ttk.Label(right, textvariable=rv).grid(row=start_row + i, column=0, columnspan=2, sticky='w')
@@ -449,6 +490,24 @@ class ExperimentGUI:
                 r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
 
         self.status_var.set('Computed values for all reservoirs')
+    
+    def get_postprocess_sample_rate(self):
+        try:
+            rate = int(self.sample_rate_entry.gt())
+        except Exception:
+            messagebox.showwarning("Warning", "Invalid sample rate, using 10 Hz")
+            return 10
+        
+        if rate < 1:
+            messagebox.showwarning("Enter a valid sample rate greater than 1")
+            return 10
+        
+        if rate > 10: #change this later to the max sample rate we put in uprocess
+            messagebox.showwarning("Enter a valid sample rate less than the max rate")
+            return 10
+        
+        return rate
+
 
     def run_experiment(self):
         # Run for three reservoirs sequentially, check threshold after each
@@ -475,6 +534,8 @@ class ExperimentGUI:
             threshold_pct = float(self.threshold_entry.get())
         except Exception:
             messagebox.showwarning('Warning', 'Invalid threshold, using 10%')
+        
+        post_hz = self.get_postprocess_sample_rate()
 
         individual_csvs = []
         run_params = []
@@ -555,6 +616,7 @@ class ExperimentGUI:
             # try to read basic columns for plotting later
             try:
                 tcol, fcol, df = extract_flow(out_csv)
+                df = downsample_by_time_nearest(df, tcol, post_hz)
                 cols = (tcol, fcol)
             except Exception:
                 cols = None
@@ -591,6 +653,7 @@ class ExperimentGUI:
             avg = None
             try:
                 tcol, fcol, dfi = extract_flow(out_csv)
+                dfi = downsample_by_time_nearest(dfi, tcol, post_hz)
                 # use reservoir position to detect valve switch (V2 state) when available
                 avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, dispense_time_s=disp_time, position=p.get('pos'))
             except Exception:
@@ -662,6 +725,8 @@ class ExperimentGUI:
                             # if this file uses a different time column name, rename it
                             if tcol != time_col_name:
                                 dfi = dfi.rename(columns={tcol: time_col_name})
+                    if time_col_name is not None and time_col_name in dfi.columns:
+                        dfi = downsample_by_time_nearest(dfi, time_col_name, post_hz)
                     dfs.append(dfi)
 
                 combined = pd.concat(dfs, ignore_index=True, sort=False)
