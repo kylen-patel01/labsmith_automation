@@ -6,35 +6,48 @@ import numpy as np
 import uProcess
 from sklearn.linear_model import LinearRegression
 from matplotlib import pyplot as plt
-user = os.getlogin()
+from pathlib import Path
+#USER SETTINGS
+application_name = "" # Change to your own calibration experiment name 
 
-uprocess_path = "C:/Program Files (x86)/LabSmith/LabSmith uProcess/uProcess.exe"
-base_dir = "C:/Users/kylenp/Desktop/LabSmith/Automation"
-calib_data = "C:/Users/kylenp/Desktop/LabSmith/Automation/CalibrationData"
-os.makedirs(base_dir, exist_ok = True)
-
-
-#Base directory for the uProcess script
-base_usq = os.path.join(base_dir, "calibration.usq")
-
-#Change data directory everytime you want to run a new calibraion curve with a new application
-data_dir = os.path.join(calib_data, "ReactionChamberChip")
-
-
-os.makedirs(data_dir,exist_ok=True)
-
-log_prefix = os.path.join(data_dir, "Calib")
-
-
-
-#DETERMINE YOUR PRESSURE TARGET SET HERE FOR CALIBRATION
+# Pressure targets for calibration curve. Adjust as needed but should cover the expected operating range of your experiment. Could use np.linspace too. 
 pressures = [2,4,6,8,10,12,14,16,18,20] #kPa
 
-#FIXED PARAMS INTO UPROCESS
-dispense_time = 30 #seconds
-p_tol = 0.1 #pressure target 
-trials_per_pressure = 4 #trials per pressure
+# Fixed parameters for uProcess. Adjust if needed but should be consistent across all trials for accurate calibration curve
+dispense_time = 30 # Length of dispense time. Adjust as needed but should be long enough to allow for pressure stabilization and accurate flow measurement but not so long that it causes excessive reagent use or long calibration time. You may need to experiment with this value based on the performance of your system.
+p_tol = 0.1 # Pressure tolerance in kPa. Adjust if needed but should be tight enough to ensure accurate pressure control but not so tight that it causes excessive trial failures or long wait times for pressure stabilization. You may need to experiment with this value based on the performance of your system.
+trials_per_pressure = 4 # trials per pressure. Adjust as needed but more trials will give a more reliable calibration curve at the cost of longer calibration time and more reagent use.
 
+
+# Path setup 
+base_dir = Path(__file__).resolve().parent
+config_path = base_dir / "config.json"
+if not config_path.exists():
+    raise FileNotFoundError(f"Config file not found at {config_path}")
+
+with open(config_path, "r", encoding = "utf-8") as f:
+    config = json.load(f)
+
+uprocess_path = Path(config["uprocess_path"])
+
+if not uprocess_path.exists():
+    raise FileNotFoundError(f"uProcess path not found at {uprocess_path}")
+
+# Calibation data folder
+calib_data = base_dir / "CalibrationData"
+calib_data.mkdir(parents = True, exist_ok = True)
+
+# Base directory for the calibration uProcess script
+base_usq = base_dir / "calibration.usq"
+if not base_usq.exists():
+    raise FileNotFoundError(f"Base calibration script not found at {base_usq}")
+
+# Data directory for this calibration run/application
+data_dir = calib_data / application_name
+data_dir.mkdir(parents=True, exist_ok = True)
+
+# File naming convention for trial CSVs. Adjust if needed but should be consistent with how build_script names the output files.
+log_prefix = "Calib"
 
 
 
@@ -42,7 +55,7 @@ trials_per_pressure = 4 #trials per pressure
 
 calibration_results = []
 std_results = []
-#build script to send into uProcess
+# Build script to send into uProcess
 def build_script(target_pressure, trial_csv):
     header = (
         f" ;Parameters \r\n"
@@ -59,6 +72,7 @@ def build_script(target_pressure, trial_csv):
     script = header + base                    
     return script
 
+# Function to extract flow data from uProcess .csv output 
 def extract_flow(csv_file):
     df = pd.read_csv(csv_file, sep=";", skiprows = [0])
     df.columns = df.columns.str.strip()
@@ -67,10 +81,10 @@ def extract_flow(csv_file):
     df[time_col] = pd.to_numeric(df[time_col], errors = 'coerce')
     df[flow_col] = pd.to_numeric(df[flow_col], errors = 'coerce')
     df.dropna(subset=[time_col, flow_col])
-    sampling = df[(df[time_col] >= 5) & (df[time_col] <= 25)] #Sampling at 10 Hz and want mean flow from 5-25 seconds (steady-state flow)
+    sampling = df[(df[time_col] >= 5) & (df[time_col] <= 25)] # Sampling at 10 Hz and want mean flow from 5-25 seconds (steady-state flow)
     return np.mean(sampling[flow_col])
 
-#Main calibration loop (averaging over 3 trials)
+# Main calibration loop (averaging over 3 trials)
 pipe = uProcess.OpenCommandPipe()
 for p in pressures:
     print(f"\n=Running {p} kPa target=")
@@ -98,7 +112,7 @@ for p in pressures:
         trial_flows.append(avg_flow)
 
 
-    #compute avg. flow for this pressure target
+    # Compute average flow for this pressure target and store results. 
     mean_flow = np.mean(trial_flows)
     std_flow = np.std(trial_flows, ddof = 1)
     calibration_results.append((p,mean_flow,std_flow))
@@ -108,27 +122,25 @@ for p in pressures:
     input("\n Refill reservoir before next pressure target. \n Press ENTER when done")
 uProcess.CloseCommandPipe(pipe)
 
-#Save curve
-
+# Save curve
 results_df = pd.DataFrame(calibration_results, columns = ["Pressure_kPa", "Flow_uLmin", "STD"])
 summary_path = os.path.join(data_dir, "calibration_curve.csv")
 results_df.to_csv(summary_path, index=False)
 print(results_df)
 
-#Fitting/regression and plotting
-
+# Fitting/regression and plotting
 X = results_df["Pressure_kPa"].values.reshape(-1,1)
 y = results_df["Flow_uLmin"].values
 
 model = LinearRegression()
 model.fit(X,y)
 
-slope= model.coef_[0];
+slope= model.coef_[0]
 intercept = model.intercept_
 r2 = model.score(X,y)
 
 
-#Save coefficients for future experiment. Change the title of .txt file to match experiment application
+# Save coefficients for future experiment. Change the title of .txt file to match experiment application
 
 coef_path = os.path.join(data_dir, "calibration_coeffs.txt")
 with open(coef_path, "w") as f:
