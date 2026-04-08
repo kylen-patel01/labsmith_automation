@@ -7,6 +7,7 @@ import uProcess
 from sklearn.linear_model import LinearRegression
 from matplotlib import pyplot as plt
 from pathlib import Path
+import json
 #USER SETTINGS
 application_name = "" # Change to your own calibration experiment name 
 
