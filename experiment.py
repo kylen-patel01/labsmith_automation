@@ -1,35 +1,64 @@
-#experiment.py
-#author: Kylen Patel
-#Last updated: 2/23/2026
+"""experiment.py
+A small application for configuring and running pressure-driven dispense experiments.
+
+This script provides a Tkinter GUI that lets the user select a calibration calibration curve,
+enter desired flow and volume for multiple reservoirs, compute pressures and dispense times,
+run uProcess scripts for each reservoir, collect output CSV files, compute steady-state flow
+values, and generate individual and combined plots.
+
+Author: Kylen Patel
+Last modified: 4/14/26
+"""
+
+# Standard library imports
 import os
 import glob
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
+from collections import deque
+import threading
+import sys
+import subprocess
+import json
+
+# Third-party imports
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from PIL import Image, ImageTk
+
+# uProcess hardware control wrapper
 import uProcess
-from collections import deque
-from matplotlib.animation import FuncAnimation
-import threading
-import sys
-import subprocess
-import json
 
 
-#Paths (adjust if needed)
+# Path setup
+
+# BASE_DIR is the folder where this script lives
+# All other paths are defined relative to this folder so the project remains portable 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+
+# Folder that contains saved calibration subfolders
 CALIB_DIR = os.path.join(BASE_DIR, "CalibrationData")
-#base usq for experiment runs
+
+# Base uProcess script for experiments
+# Recall: Python prepends the run-specific header to this file before sending it to uProcess 
 BASE_USQ = os.path.join(BASE_DIR, "experiment.usq")
 
-
 def find_calibration_curves(calib_root):
-    #Return dict keyed by subfolder name. Each value contains slope/intercept/r2 and optional csv
+    '''
+    Scan the calibration folder and build a dictionary of available calibrations 
+    Each calibration is stored in its own subfolder. The function looks for: 
+    - calibration_coeffs.txt file containing slope/intercept/r2 values
+    - optional calibration_curve.csv with raw data points
+    - optional calibration plot PNG for display in the GUI
+
+    Returns: 
+    A dict keyed by subfolder name (the names the user sees in the GUI)
+    Each value is a dict with keys: slope, intercept, r2, dir (full path to subfolder), path (full path to coeffs file), curve_csv (full path to csv), curve_png (full path to png)
+    '''
     curves = {}
     if not os.path.isdir(calib_root):
         return curves
@@ -38,7 +67,7 @@ def find_calibration_curves(calib_root):
         if not os.path.isdir(full):
             continue
         vals = {'slope': None, 'intercept': None, 'r2': None, 'dir': full, 'path': None, 'curve_csv': None, 'curve_png': None}
-        # look for coeffs file
+        # Search the folder for the expected calibration files
         for f in os.listdir(full):
             if f.lower().startswith('calibration_coeffs') and f.lower().endswith('.txt'):
                 vals.update(parse_coeffs_file(os.path.join(full, f)))
@@ -47,17 +76,26 @@ def find_calibration_curves(calib_root):
                 vals['curve_csv'] = os.path.join(full, f)
             if f.lower().endswith('.png') and ('plot' in f.lower() or 'calib' in f.lower() or 'calibration' in f.lower()):
                 vals['curve_png'] = os.path.join(full, f)
-        # if no coeffs, create dummy linear relation for UI demo
+        
+        # Fallback values are only used so the GUI still has something to display
+        # even if the calibration folder is incomplete. In normal use, real values should be present 
         if vals['slope'] is None or vals['intercept'] is None:
-            # create simple dummy: flow = 10*pressure + 0
-            vals['slope'] = 10.0
-            vals['intercept'] = 0.0
+            # create simple dummy: flow = 5*pressure + 1
+            vals['slope'] = 5.0
+            vals['intercept'] = 1.0
             vals['r2'] = 1.0
         curves[entry] = vals
     return curves
 
 
 def parse_coeffs_file(path):
+    '''
+    Read a calibration_coeffs.txt file and extract slope, intercept, and r2 values. The file is expected to have lines like:
+    Expectd file format: 
+        Slope = ...
+        Intercept = ...
+        R2 = ...
+    '''
     vals = {'slope': None, 'intercept': None, 'r2': None}
     try:
         with open(path, 'r') as f:
@@ -73,11 +111,27 @@ def parse_coeffs_file(path):
                     except Exception:
                         vals['r2'] = None
     except Exception:
+        # If parsing fails, leave values as None
         pass
     return vals
 
 
+# uProcess script preparation
 def build_script(target_pressure, dispense_time_s, trial_csv, p_tol=0.1, position=None):
+    '''
+    Build the full script text that will be sent to uProcess
+    
+    The script sent to uProcess is made of two pieces:
+    1. A short parameter header generated by Python for this specific run. 
+    2. The validated base .usq script containing the hardware logic 
+
+    Parameters:
+    - target_pressure: the pressure to apply for this run (kPa)
+    - dispense_time_s: the time to keep the pressure on (seconds)
+    - trial_csv: the path where the run's output CSV should be saved (this is passed to the script so it can log data there)
+    - p_tol: pressure tolerance passed into the script
+    - position: reservoir position used by the AV801 selector value 
+    '''
     header = (
         f" ;Parameters \r\n"
         f"TargetPressure = {target_pressure} kPa\r\n"
@@ -85,7 +139,7 @@ def build_script(target_pressure, dispense_time_s, trial_csv, p_tol=0.1, positio
         f"DispenseTime = {dispense_time_s} s\r\n"
         f"OutputFile = \"{trial_csv}\"\r\n"
     )
-    # include reservoir position parameter if provided
+    # Include reservoir position parameter if provided
     if position is not None:
         header += f"ReservoirPosition = {position}\r\n"
     header += "\r\n"
@@ -97,7 +151,19 @@ def build_script(target_pressure, dispense_time_s, trial_csv, p_tol=0.1, positio
     return script
 
 
+# CSV parsing/flow analysis
+
 def extract_flow(csv_file):
+    '''
+    Read a uProcess .csv file and identify the time and flow columns.
+
+    The function expects the output format produced by the uProcess experiment script.
+    It first looks for named columns containing 'Time (s)' and 'SF06'. If those are absent,
+    it falls back to the first two numeric columns in the file.
+
+    Returns:
+    (time_col_name, flow_col_name, dataframe)
+    '''
     df = pd.read_csv(csv_file, sep=';', skiprows=[0])
     df.columns = df.columns.str.strip()
     flow_col = [c for c in df.columns if 'SF06' in c]
@@ -119,12 +185,31 @@ def extract_flow(csv_file):
 
 
 def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, threshold_flow=None, position=None):
-    # find first time where flow exceeds threshold_flow
+    '''
+    Compute the steady state mean flow from the dispense portion of the data file.
+
+    The function identifies the dispense start using the valve selector position change
+    (if available), then computes the average flow over the middle half of the expected
+    dispense interval.
+
+    Parameters:
+    - df: the DataFrame containing the data
+    - time_col: the name of the time column
+    - flow_col: the name of the flow column
+    - dispense_time_s: the time to keep the pressure on (seconds)
+    - threshold_flow: legacy parameter, currently ignored
+    - position: the reservoir position used by the AV801 selector value
+
+    Returns:
+    The steady-state mean flow or None if it cannot be computed
+    '''
+
+    # If the data are missing, we cannot compute a steady-state average
     if df is None or len(df) == 0:
         return None
     times = df[time_col].values
     flows = df[flow_col].values
-    # try to detect start based on valve 2 state (position) if provided
+    # Try to detect start based on valve 2 state (position) if provided
     t_start = None
     if position is not None:
         valve_col = None
@@ -152,29 +237,10 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, t
                 except Exception:
                     t_start = None
 
-    # if we didn't get a start from valve position, fall back to dynamic change detection
+    # if we didn't get a start from valve position, we cannot determine dispense start reliably
     if t_start is None:
-        # sort by time to compute a baseline from the beginning of the file
-        try:
-            dsorted = df.sort_values(time_col)
-            fvals = dsorted[flow_col].values
-            tvals = dsorted[time_col].values
-        except Exception:
-            return None
-        n = len(fvals)
-        if n == 0:
-            return None
-        # baseline uses the first few samples (up to 5% of file or 10 samples)
-        baseline_count = max(1, min(10, int(max(1, n * 0.05))))
-        baseline = fvals[:baseline_count]
-        med = float(np.median(baseline))
-        std = float(np.std(baseline))
-        # dynamic threshold: use 3*sigma or a small absolute floor
-        dyn_thr = max(0.01, std * 3.0)
-        idx = np.where(np.abs(fvals - med) > dyn_thr)[0]
-        if idx.size == 0:
-            return None
-        t_start = float(tvals[int(idx[0])])
+        return None
+
     # define middle-half window within dispense time
     if dispense_time_s is None or dispense_time_s <= 0:
         # fallback: average middle half of entire recording
@@ -198,44 +264,12 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, t
             return None
     return float(np.mean(sample[flow_col]))
 
-def downsample_by_time_nearest(df, time_col, target_hz):
-    if df is None or df.empty or target_hz is None or target_hz <= 0:
-        return df
-    
-    dfo = df.copy()
-    dfo[time_col] = pd.to_numeric(dfo[time_col], errors = 'coerce')
-    dfo = dfo.dropna(subset = [time_col])
-    dfo = dfo.sort_values(time_col).reset_index(drop= True)
-
-    if dfo.empty():
-        return dfo
-    
-    target_hz = max(1,min(10,int(target_hz))) #change to max uprocess sample rate as well
-
-    if target_hz == 10:
-        return dfo.copy()
-    
-    dt = 1.0/float(target_hz) #time step
-    tvals = dfo[time_col].to_numpy(dtype = float)
-
-    tmin = float(tvals[0])
-    tmax = float(tvals[-1])
-
-    target_times = np.arange(tmin, tmax + 0.5 * dt, dt)
-    
-    chosen_idx = []
-    used = set()
-
-    for tt in target_times:
-        idx = int(np.argmin(np.abs(tvals-tt)))
-        if idx not in used:
-            chosen_idx.append(idx)
-            used.add(idx)
-    
-    chosen_idx = sorted(chosen_idx)
-    return dfo.iloc[chosen_idx].reset_index(drop = True)
 
 def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
+    '''
+    Create an overlay plot of flow and pressure vs. time for a single run or combined run 
+    Flow is plotted on the left y-axis and pressure on the right y-axis.
+    '''
     try:
         fig = Figure(figsize=(8, 4))
         ax1 = fig.add_subplot(111)
@@ -260,8 +294,22 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
     except Exception:
         return False
 
-#Live plotting for flow sanity check. Live-plot flow from the current active uProcess .csv log. Call once to start; it reschedules itself with root.after()
+# GUI CLASS
+
 class ExperimentGUI:
+    '''
+    Tkinter-based GUI for selecting a calibration and running one or more experiments.
+
+    The GUI lets the user:
+    - choose a calibration curve
+    - input desired flow rates and volumes for up to 12 reservoirs
+    - compute the required pressures and dispense times based on the selected calibration
+    - run the experiments sequentially, saving output CSVs for each reservoir
+    - launch the full experiment sequence
+    - view results and flow/pressure overlays after each run
+    - monitor live state for integration with a live plotting script
+    - handle errors and provide feedback through the interface
+    '''
     def __init__(self, root):
         self.root = root
         root.title('Experiment Runner')
@@ -296,69 +344,117 @@ class ExperimentGUI:
         self.threshold_entry.insert(0, '10')
         self.threshold_entry.grid(row=1, column=1, sticky='ew')
 
-        ttk.Label(right, text = 'Sample Rate (Hz): ').grid(row = 2, column = 0, sticky = 'w')
-        self.sample_rate_entry = tk.Entry(right)
-        self.sample_rate_entry.insert(0, '10')
-        self.sample_rate_entry.grid(row = 2, column = 1, sticky = 'ew')
-
-        ttk.Label(right, text='Experiment name:').grid(row=3, column=0, sticky='w')
+        ttk.Label(right, text='Experiment name:').grid(row=2, column=0, sticky='w')
         self.output_label = tk.Entry(right)
-        self.output_label.insert(0, 'experiment_name')
-        self.output_label.grid(row=3, column=1, sticky='ew')
+        self.output_label.insert(0, 'exp1')
+        self.output_label.grid(row=2, column=1, sticky='ew')
 
-        # Reservoir entries (3)
+        ttk.Label(right, text='Number of experiments:').grid(row=3, column=0, sticky='w')
+        self.num_experiments_var = tk.IntVar(value=3)
+        self.num_ex_cb = ttk.Combobox(right, values=list(range(1, 13)), textvariable=self.num_experiments_var, state='readonly', width=5)
+        self.num_ex_cb.grid(row=3, column=1, sticky='w')
+        self.num_ex_cb.bind('<<ComboboxSelected>>', self.on_experiment_count_changed)
+
+        # Scrollable frame for reservoir controls
+        self.res_container = ttk.Frame(right)
+        self.res_container.grid(row=4, column=0, columnspan=2, sticky='nsew')
+        self.res_canvas = tk.Canvas(self.res_container, borderwidth=0, highlightthickness=0, height=520)
+        self.res_scrollbar = ttk.Scrollbar(self.res_container, orient='vertical', command=self.res_canvas.yview)
+        self.res_inner = ttk.Frame(self.res_canvas)
+        self.res_inner.bind('<Configure>', lambda e: self.res_canvas.configure(scrollregion=self.res_canvas.bbox('all')))
+        self.res_canvas.create_window((0, 0), window=self.res_inner, anchor='nw')
+        self.res_canvas.configure(yscrollcommand=self.res_scrollbar.set)
+        self.res_canvas.grid(row=0, column=0, sticky='nsew')
+        self.res_scrollbar.grid(row=0, column=1, sticky='ns')
+        self.res_container.grid_rowconfigure(0, weight=1)
+        self.res_container.grid_columnconfigure(0, weight=1)
+
+        self.result_frame = ttk.Frame(right)
+        self.result_frame.grid(row=5, column=0, columnspan=2, sticky='w')
+
+        self.status_var = tk.StringVar(value='Ready')
+        self.status_label = ttk.Label(right, textvariable=self.status_var)
+        self.status_label.grid(row=6, column=0, columnspan=2, sticky='w')
+
+        self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
+        self.compute_btn.grid(row=7, column=0, pady=6)
+        self.run_btn = ttk.Button(right, text='Run Experiment', command=self.run_experiment)
+        self.run_btn.grid(row=7, column=1, pady=6)
+
         self.reservoirs = []
-        num_res = 3
+        self.result_vars = []
+        self.build_reservoir_inputs()
+        
+        # For live plotting
+        self.live_state_file = os.path.join(BASE_DIR, "live_state.json")
+        self.plot_proc = None
+
+    def build_reservoir_inputs(self):
+        '''
+        Build the input fields for each reservoir based on the selected number of experiments.
+        '''
+        for child in self.res_inner.winfo_children():
+            child.destroy()
+        for child in self.result_frame.winfo_children():
+            child.destroy()
+
+        self.res_inner.grid_columnconfigure(0, weight=0)
+        self.res_inner.grid_columnconfigure(1, weight=1)
+        self.result_frame.grid_columnconfigure(0, weight=1)
+
+        self.reservoirs = []
+        self.result_vars = []
+        num_res = self.num_experiments_var.get()
+
         for i in range(num_res):
-            row = 4 + i * 4
-            ttk.Label(right, text=f'Reservoir{i+1} position (2-8):').grid(row=row, column=0, sticky='w')
-            pos = tk.Entry(right)
-            # default position clamped to valid selector range (2-8)
+            row = i * 4
+            ttk.Label(self.res_inner, text=f'Experiment {i+1} reservoir position (2-8):').grid(row=row, column=0, sticky='w', padx=2, pady=2)
+            pos = tk.Entry(self.res_inner)
             pos_val = min(8, 2 + i)
             pos.insert(0, str(pos_val))
-            pos.grid(row=row, column=1, sticky='ew')
+            pos.grid(row=row, column=1, sticky='ew', padx=2, pady=2)
 
-            ttk.Label(right, text=f'Reservoir{i+1} desired flow rate (uL/min):').grid(row=row+1, column=0, sticky='w')
-            flow = tk.Entry(right)
+            ttk.Label(self.res_inner, text=f'Reservoir {i+1} desired flow rate (uL/min):').grid(row=row+1, column=0, sticky='w', padx=2, pady=2)
+            flow = tk.Entry(self.res_inner)
             flow.insert(0, '100')
-            flow.grid(row=row+1, column=1, sticky='ew')
+            flow.grid(row=row+1, column=1, sticky='ew', padx=2, pady=2)
 
-            ttk.Label(right, text=f'Reservoir{i+1} desired volume to be dispensed (uL):').grid(row=row+2, column=0, sticky='w')
-            vol = tk.Entry(right)
+            ttk.Label(self.res_inner, text=f'Reservoir {i+1} desired volume to be dispensed (uL):').grid(row=row+2, column=0, sticky='w', padx=2, pady=2)
+            vol = tk.Entry(self.res_inner)
             vol.insert(0, '100')
-            vol.grid(row=row+2, column=1, sticky='ew')
+            vol.grid(row=row+2, column=1, sticky='ew', padx=2, pady=2)
 
-            # labels to display computed pressure and time
             pressure_lbl = tk.StringVar(value='Pressure: N/A')
             time_lbl = tk.StringVar(value='DispenseTime (s): N/A')
-            ttk.Label(right, textvariable=pressure_lbl).grid(row=row+3, column=0, sticky='w')
-            ttk.Label(right, textvariable=time_lbl).grid(row=row+3, column=1, sticky='w')
+            ttk.Label(self.res_inner, textvariable=pressure_lbl).grid(row=row+3, column=0, sticky='w', padx=2, pady=2)
+            ttk.Label(self.res_inner, textvariable=time_lbl).grid(row=row+3, column=1, sticky='w', padx=2, pady=2)
 
             self.reservoirs.append({'pos': pos, 'flow': flow, 'vol': vol, 'pressure_lbl': pressure_lbl, 'time_lbl': time_lbl})
 
-        # Result labels (populated after runs)
-        self.result_vars = []
-        start_row = 4 + num_res * 4
         for i in range(num_res):
-            rv = tk.StringVar(value=f'Reservoir{i+1} Steady-State Avg: N/A (% difference from desired flow: N/A)')
-            ttk.Label(right, textvariable=rv).grid(row=start_row + i, column=0, columnspan=2, sticky='w')
+            rv = tk.StringVar(value=f'Experiment {i+1} Steady-State Avg: N/A (% difference from desired flow: N/A)')
+            ttk.Label(self.result_frame, textvariable=rv).grid(row=i, column=0, sticky='w', padx=2, pady=1)
             self.result_vars.append(rv)
 
-        # Status (above buttons)
-        self.status_var = tk.StringVar(value='Ready')
-        ttk.Label(right, textvariable=self.status_var).grid(row=start_row + num_res, column=0, columnspan=2, sticky='w')
+        self.compute_btn.configure(text=f'Compute All ({num_res} experiments)')
+        self.run_btn.configure(text=f'Run Experiment ({num_res} experiments)')
 
-        # Buttons at the bottom
-        self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
-        self.compute_btn.grid(row=start_row + num_res + 1, column=0, pady=6)
-        self.run_btn = ttk.Button(right, text='Run Experiment (3 reservoirs)', command=self.run_experiment)
-        self.run_btn.grid(row=start_row + num_res + 1, column=1, pady=6)
-        
-        #for live plotting
-        self.live_state_file = os.path.join(BASE_DIR, "live_state.json")
-        self.plot_proc = None
-    
+    # Update the number of reservoir input fields when the experiment count is changed.
+    def on_experiment_count_changed(self, event=None):
+        try:
+            count = int(self.num_experiments_var.get())
+        except Exception:
+            count = 3
+            self.num_experiments_var.set(count)
+        count = max(1, min(12, count))
+        self.num_experiments_var.set(count)
+        self.build_reservoir_inputs()
+
     def write_live_state(self, csv_path = None, run_index = 0, done = False):
+        '''
+        Write a small JSON file that tells the external live plotter which CSV file 
+        is currently active. The live plotter can read this file and update its display accordingly.
+        '''
         state = {
             "csv_path": csv_path,
             "run_index": run_index,
@@ -371,6 +467,10 @@ class ExperimentGUI:
             print(f"write_live_state_error: {e}")
     
     def start_live_plotter(self):
+        '''
+        Launch the separate live_plotter_multi.py script as a subprocess. This script will read the live_state.json file 
+        to know which CSV to plot and will update in real time as the experiment runs.
+        '''
         try:
             if self.plot_proc is not None and self.plot_proc.poll() is None:
                 return
@@ -380,6 +480,7 @@ class ExperimentGUI:
         except Exception as e:
             print(f"could not start live plotter because: {e}")
     
+    # Cleanly stop the live plotter before closing the GUI 
     def on_close(self):
         try:
             self.write_live_state(csv_path = None, run_index = 0, done = True)
@@ -397,6 +498,12 @@ class ExperimentGUI:
         
 
     def on_curve_selected(self, event=None):
+        '''
+        Handle the selection of a calibration curve from the dropdown.
+
+        If a .png exists, show the image directly. 
+        Otherwise, draw the line fit and any raw data points from the .csv on the matplotlib canvas.
+        '''
         name = self.curve_cb.get()
         if not name:
             return
@@ -412,7 +519,7 @@ class ExperimentGUI:
                 self._calib_photo = ImageTk.PhotoImage(img)
                 self.img_label.config(image=self._calib_photo)
                 self.img_label.image = self._calib_photo
-                # hide canvas and show image
+                # hide canvas and show image instead of recomputing the plot
                 try:
                     self.canvas.get_tk_widget().pack_forget()
                 except Exception:
@@ -422,7 +529,7 @@ class ExperimentGUI:
             except Exception:
                 pass
 
-        # fallback: draw line and any CSV points
+        # fallback: draw the calibration fit and any raw CSV points
         # hide image label and ensure canvas is visible
         try:
             self.img_label.config(image='')
@@ -454,6 +561,10 @@ class ExperimentGUI:
         return None
 
     def compute_all(self):
+        '''
+        Compute the required pressure and dispense time for all reservoirs using the selected calibration curve.
+        '''
+        # Read the selected calibration and calculate each reservoir's target pressure and dispense duration
         name = self.curve_cb.get()
         if not name:
             messagebox.showerror('Error', 'Select a calibration curve first')
@@ -467,7 +578,7 @@ class ExperimentGUI:
                 desired_flow = float(r['flow'].get())
                 vol = float(r['vol'].get())
             except Exception:
-                messagebox.showerror('Error', f'Invalid inputs for reservoir {i+1}')
+                messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
                 return
             # compute required pressure
             if slope == 0:
@@ -490,27 +601,21 @@ class ExperimentGUI:
                 r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
 
         self.status_var.set('Computed values for all reservoirs')
-    
-    def get_postprocess_sample_rate(self):
-        try:
-            rate = int(self.sample_rate_entry.gt())
-        except Exception:
-            messagebox.showwarning("Warning", "Invalid sample rate, using 10 Hz")
-            return 10
-        
-        if rate < 1:
-            messagebox.showwarning("Enter a valid sample rate greater than 1")
-            return 10
-        
-        if rate > 10: #change this later to the max sample rate we put in uprocess
-            messagebox.showwarning("Enter a valid sample rate less than the max rate")
-            return 10
-        
-        return rate
-
 
     def run_experiment(self):
-        # Run for three reservoirs sequentially, check threshold after each
+        '''
+        Run all experiment rows sequentially.
+
+        For each configured reservoir row:
+        - compute the required pressure and dispense time from the selected calibration
+        - build a run-specific uProcess script and send it through the hardware pipe
+        - wait for the run to finish and collect the generated CSV file
+        - plot and save a single-run overlay of flow and pressure
+        - compute steady-state flow metrics after the run sequence completes
+
+        Once all runs are finished, the function also concatenates the individual CSV files
+        into a single combined file with a continuous time axis.
+        '''
         name = self.curve_cb.get()
         if not name:
             messagebox.showerror('Error', 'Select a calibration curve first')
@@ -534,13 +639,11 @@ class ExperimentGUI:
             threshold_pct = float(self.threshold_entry.get())
         except Exception:
             messagebox.showwarning('Warning', 'Invalid threshold, using 10%')
-        
-        post_hz = self.get_postprocess_sample_rate()
 
         individual_csvs = []
         run_params = []
 
-        # Open a single pipe and reuse it for runs
+        # Open a single pipe and reuse it for all runs in this experiment sequence
         try:
             pipe = uProcess.OpenCommandPipe()
         except Exception as e:
@@ -553,12 +656,12 @@ class ExperimentGUI:
                 vol = float(r['vol'].get())
                 pos = int(r['pos'].get())
             except Exception:
-                messagebox.showerror('Error', f'Invalid inputs for reservoir {i+1}')
+                messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
                 return
 
             # enforce valid reservoir positions 2-8
             if pos < 2 or pos > 8:
-                messagebox.showerror('Error', f'Reservoir position for Res{i+1} must be between 2 and 8')
+                messagebox.showerror('Error', f'Reservoir position for experiment {i+1} must be between 2 and 8')
                 return
 
             if slope == 0:
@@ -588,7 +691,7 @@ class ExperimentGUI:
 
             self.write_live_state(csv_path = out_csv, run_index = i, done = False)
 
-            # create script and run
+# create script and run. The script uses a per-run header plus the base .usq template.
             script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
             script_text = script_text.replace('\x00', '')
             script_text = script_text.replace('\n', '\r\n')
@@ -616,7 +719,6 @@ class ExperimentGUI:
             # try to read basic columns for plotting later
             try:
                 tcol, fcol, df = extract_flow(out_csv)
-                df = downsample_by_time_nearest(df, tcol, post_hz)
                 cols = (tcol, fcol)
             except Exception:
                 cols = None
@@ -653,7 +755,6 @@ class ExperimentGUI:
             avg = None
             try:
                 tcol, fcol, dfi = extract_flow(out_csv)
-                dfi = downsample_by_time_nearest(dfi, tcol, post_hz)
                 # use reservoir position to detect valve switch (V2 state) when available
                 avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, dispense_time_s=disp_time, position=p.get('pos'))
             except Exception:
@@ -725,13 +826,12 @@ class ExperimentGUI:
                             # if this file uses a different time column name, rename it
                             if tcol != time_col_name:
                                 dfi = dfi.rename(columns={tcol: time_col_name})
-                    if time_col_name is not None and time_col_name in dfi.columns:
-                        dfi = downsample_by_time_nearest(dfi, time_col_name, post_hz)
                     dfs.append(dfi)
 
+                # concatenate all runs into a single combined DataFrame and save it.
                 combined = pd.concat(dfs, ignore_index=True, sort=False)
                 combined.to_csv(combined_path, index=False)
-                # detect columns for overlay
+                # detect the columns we need for the combined overlay plot
                 time_col = None
                 flow_col = None
                 pressure_col = None
@@ -757,9 +857,11 @@ class ExperimentGUI:
                 messagebox.showwarning('Warning', f'Could not combine CSVs: {e}')
                 self.status_var.set('Done with warnings')
 
+# Script entry point
+
 def main():
+    # Initialize the Tkinter root window and launch the main GUI application
     root = tk.Tk()
-    # default window size expanded to show 3 reservoirs and controls
     try:
         root.geometry('1400x1100')
         root.minsize(1100, 800)
