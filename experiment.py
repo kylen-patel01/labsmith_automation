@@ -347,6 +347,10 @@ class ExperimentGUI:
         # Create right frame for controls
         right = ttk.Frame(root)
         right.grid(row=0, column=1, sticky='nswe', padx=6, pady=6)
+        # Configure right frame columns for better layout
+        right.grid_columnconfigure(0, weight=0)
+        right.grid_columnconfigure(1, weight=1)
+        right.grid_columnconfigure(2, weight=0)
 
         # Plot area
         # Image label for displaying calibration png (preferred)
@@ -397,7 +401,7 @@ class ExperimentGUI:
         # Scrollable frame for reservoir controls
         # Create container frame for scrollable area
         self.res_container = ttk.Frame(right)
-        self.res_container.grid(row=4, column=0, columnspan=2, sticky='nsew')
+        self.res_container.grid(row=4, column=0, columnspan=3, sticky='nsew')
         # Create canvas for scrolling
         self.res_canvas = tk.Canvas(self.res_container, borderwidth=0, highlightthickness=0, height=520)
         # Create scrollbar
@@ -412,25 +416,26 @@ class ExperimentGUI:
         self.res_canvas.configure(yscrollcommand=self.res_scrollbar.set)
         # Grid canvas and scrollbar
         self.res_canvas.grid(row=0, column=0, sticky='nsew')
-        self.res_scrollbar.grid(row=0, column=1, sticky='ns')
+        self.res_scrollbar.grid(row=0, column=2, sticky='ns')
         # Configure grid weights
         self.res_container.grid_rowconfigure(0, weight=1)
         self.res_container.grid_columnconfigure(0, weight=1)
+        self.res_container.grid_columnconfigure(2, weight=0)  # Added for scrollbar column
 
         # Create result frame
         self.result_frame = ttk.Frame(right)
-        self.result_frame.grid(row=5, column=0, columnspan=2, sticky='w')
+        self.result_frame.grid(row=5, column=0, columnspan=3, sticky='w')
 
         # Create status variable and label
         self.status_var = tk.StringVar(value='Ready')
         self.status_label = ttk.Label(right, textvariable=self.status_var)
-        self.status_label.grid(row=6, column=0, columnspan=2, sticky='w')
+        self.status_label.grid(row=6, column=0, columnspan=3, sticky='w')
 
         # Create compute and run buttons
         self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
         self.compute_btn.grid(row=7, column=0, pady=6)
         self.run_btn = ttk.Button(right, text='Run Experiment', command=self.run_experiment)
-        self.run_btn.grid(row=7, column=1, pady=6)
+        self.run_btn.grid(row=7, column=2, pady=6)
 
         # Initialize lists for reservoirs and result variables
         self.reservoirs = []
@@ -447,50 +452,76 @@ class ExperimentGUI:
     def build_reservoir_inputs(self):
         '''
         Build the input fields for each reservoir based on the selected number of experiments.
+        Arranged in a 2-column grid: experiments 1-2 in first row, 3-4 in second, etc.
         '''
+        # Clear existing widgets
         for child in self.res_inner.winfo_children():
             child.destroy()
         for child in self.result_frame.winfo_children():
             child.destroy()
 
-        self.res_inner.grid_columnconfigure(0, weight=0)
-        self.res_inner.grid_columnconfigure(1, weight=1)
+        # Configure column weights for 2-column layout (labels: weight 0, entries: weight 1)
+        self.res_inner.grid_columnconfigure(0, weight=0)  # Labels for column 1
+        self.res_inner.grid_columnconfigure(1, weight=1)  # Entries for column 1
+        self.res_inner.grid_columnconfigure(2, weight=0)  # Labels for column 2
+        self.res_inner.grid_columnconfigure(3, weight=1)  # Entries for column 2
+        
+        # Configure result frame for 2 columns
         self.result_frame.grid_columnconfigure(0, weight=1)
+        self.result_frame.grid_columnconfigure(1, weight=1)
 
+        # Initialize lists
         self.reservoirs = []
         self.result_vars = []
         num_res = self.num_experiments_var.get()
 
+        # Build input fields for each experiment in 2-column grid
         for i in range(num_res):
-            row = i * 4
-            ttk.Label(self.res_inner, text=f'Experiment {i+1} reservoir position (2-8):').grid(row=row, column=0, sticky='w', padx=2, pady=2)
+            # Calculate position in grid
+            col_offset = (i % 2) * 2  # 0 for left column, 2 for right column
+            row_base = (i // 2) * 5  # 5 rows per row of experiments
+            
+            # Bold header for each experiment
+            header_label = ttk.Label(self.res_inner, text=f'Experiment {i+1}', font=('TkDefaultFont', 10, 'bold'))
+            header_label.grid(row=row_base, column=col_offset, columnspan=2, sticky='w', pady=2)
+            
+            # Position input
+            ttk.Label(self.res_inner, text='Pos (2-8):').grid(row=row_base+1, column=col_offset, sticky='w', padx=1, pady=1)
             pos = tk.Entry(self.res_inner)
             pos_val = min(8, 2 + i)
             pos.insert(0, str(pos_val))
-            pos.grid(row=row, column=1, sticky='ew', padx=2, pady=2)
-
-            ttk.Label(self.res_inner, text=f'Reservoir {i+1} desired flow rate (uL/min):').grid(row=row+1, column=0, sticky='w', padx=2, pady=2)
+            pos.grid(row=row_base+1, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            
+            # Flow input
+            ttk.Label(self.res_inner, text='Flow (uL/min):').grid(row=row_base+2, column=col_offset, sticky='w', padx=1, pady=1)
             flow = tk.Entry(self.res_inner)
             flow.insert(0, '100')
-            flow.grid(row=row+1, column=1, sticky='ew', padx=2, pady=2)
-
-            ttk.Label(self.res_inner, text=f'Reservoir {i+1} desired volume to be dispensed (uL):').grid(row=row+2, column=0, sticky='w', padx=2, pady=2)
+            flow.grid(row=row_base+2, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            
+            # Volume input
+            ttk.Label(self.res_inner, text='Vol (uL):').grid(row=row_base+3, column=col_offset, sticky='w', padx=1, pady=1)
             vol = tk.Entry(self.res_inner)
             vol.insert(0, '100')
-            vol.grid(row=row+2, column=1, sticky='ew', padx=2, pady=2)
-
+            vol.grid(row=row_base+3, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            
+            # Pressure and time labels
             pressure_lbl = tk.StringVar(value='Pressure: N/A')
-            time_lbl = tk.StringVar(value='DispenseTime (s): N/A')
-            ttk.Label(self.res_inner, textvariable=pressure_lbl).grid(row=row+3, column=0, sticky='w', padx=2, pady=2)
-            ttk.Label(self.res_inner, textvariable=time_lbl).grid(row=row+3, column=1, sticky='w', padx=2, pady=2)
-
+            time_lbl = tk.StringVar(value='Time (s): N/A')
+            ttk.Label(self.res_inner, textvariable=pressure_lbl).grid(row=row_base+4, column=col_offset, sticky='w', padx=1, pady=1)
+            ttk.Label(self.res_inner, textvariable=time_lbl).grid(row=row_base+4, column=col_offset+1, sticky='w', padx=1, pady=1)
+            
+            # Store reservoir data
             self.reservoirs.append({'pos': pos, 'flow': flow, 'vol': vol, 'pressure_lbl': pressure_lbl, 'time_lbl': time_lbl})
 
+        # Build result labels in 2 columns
         for i in range(num_res):
+            result_row = i // 2
+            result_col = i % 2
             rv = tk.StringVar(value=f'Experiment {i+1} Steady-State Avg: N/A (% difference from desired flow: N/A)')
-            ttk.Label(self.result_frame, textvariable=rv).grid(row=i, column=0, sticky='w', padx=2, pady=1)
+            ttk.Label(self.result_frame, textvariable=rv).grid(row=result_row, column=result_col, sticky='w', padx=2, pady=1)
             self.result_vars.append(rv)
 
+        # Update button texts
         self.compute_btn.configure(text=f'Compute All ({num_res} experiments)')
         self.run_btn.configure(text=f'Run Experiment ({num_res} experiments)')
 
@@ -677,9 +708,9 @@ class ExperimentGUI:
             else:
                 r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa')
             if disp_time is None:
-                r['time_lbl'].set('DispenseTime(s): N/A')
+                r['time_lbl'].set('Time (s): N/A')
             else:
-                r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
+                r['time_lbl'].set(f'Time (s): {disp_time:.2f}')
 
         self.status_var.set('Computed values for all reservoirs')
 
@@ -774,7 +805,7 @@ class ExperimentGUI:
                 r['pressure_lbl'].set('Pressure: N/A')
             else:
                 r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa')
-            r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
+            r['time_lbl'].set(f'Time (s): {disp_time:.2f}')
 
             # Store run parameters
             run_params.append({'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos, 'out_csv': None})
