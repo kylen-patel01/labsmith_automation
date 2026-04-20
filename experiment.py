@@ -34,7 +34,7 @@ from PIL import Image, ImageTk
 import uProcess
 
 
-# Path setup
+# PATH SETUP
 
 # BASE_DIR is the folder where this script lives
 # All other paths are defined relative to this folder so the project remains portable 
@@ -697,41 +697,53 @@ class ExperimentGUI:
         Once all runs are finished, the function also concatenates the individual CSV files
         into a single combined file with a continuous time axis.
         '''
+        # Get the selected calibration curve name
         name = self.curve_cb.get()
+        # Check if a calibration is selected
         if not name:
             messagebox.showerror('Error', 'Select a calibration curve first')
             return
+        # Retrieve calibration info
         info = self.curves[name]
+        # Get slope and intercept from calibration
         slope = info.get('slope')
         intercept = info.get('intercept')
+        # Generate timestamp for output files
         timestamp = time.strftime('%Y%m%d_%H%M%S')
-        # Save outputs under Automation/ExperimentData/<curve>/<experiment_name>/
+        # Define experiment data directory
         EXP_DATA_DIR = os.path.join(BASE_DIR, 'ExperimentData')
+        # Get experiment name or use timestamp
         exp_name = self.output_label.get().strip() or timestamp
+        # Create output directory for this experiment
         out_dir = os.path.join(EXP_DATA_DIR, name, exp_name)
         os.makedirs(out_dir, exist_ok=True)
-        # live plot start
+        # Initialize live plotting state
         self.write_live_state(csv_path = None, run_index = 0, done = False)
+        # Start the live plotter subprocess
         self.start_live_plotter()
 
-
+        # Set default threshold percentage
         threshold_pct = 10.0
+        # Try to read threshold from entry
         try:
             threshold_pct = float(self.threshold_entry.get())
         except Exception:
             messagebox.showwarning('Warning', 'Invalid threshold, using 10%')
 
+        # Initialize lists for CSV paths and run parameters
         individual_csvs = []
         run_params = []
 
-        # Open a single pipe and reuse it for all runs in this experiment sequence
+        # Open a single pipe for all runs
         try:
             pipe = uProcess.OpenCommandPipe()
         except Exception as e:
             messagebox.showerror("Error", f'could not open uProcess pipe: {e}')
             return
 
+        # Loop through each reservoir
         for i, r in enumerate(self.reservoirs):
+            # Get desired flow, volume, and position
             try:
                 desired_flow = float(r['flow'].get())
                 vol = float(r['vol'].get())
@@ -740,48 +752,52 @@ class ExperimentGUI:
                 messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
                 return
 
-            # enforce valid reservoir positions 2-8
+            # Validate reservoir position
             if pos < 2 or pos > 8:
                 messagebox.showerror('Error', f'Reservoir position for experiment {i+1} must be between 2 and 8')
                 return
 
+            # Calculate pressure
             if slope == 0:
                 pressure = 0.0
             else:
                 pressure = (desired_flow - intercept) / slope
 
+            # Calculate dispense time
             if desired_flow <= 0:
                 disp_time = 0
             else:
                 disp_time = (vol / desired_flow) * 60.0
 
-            # update labels for this reservoir before running
+            # Update UI labels
             if slope == 0:
                 r['pressure_lbl'].set('Pressure: N/A')
             else:
                 r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa')
             r['time_lbl'].set(f'DispenseTime(s): {disp_time:.2f}')
 
+            # Store run parameters
             run_params.append({'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos, 'out_csv': None})
 
-            # file naming: Experiment_{calibfolder}_RES{pos}_{timestamp}.csv
-            base_label = self.output_label.get().strip() or 'Experiment'
-            # file inside ExperimentData/<curve> : <curve>_RES<pos>_<timestamp>.csv
+            # Generate output CSV path
             out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
             out_csv = out_csv.replace('\\', '/')
 
+            # Update live state for this run
             self.write_live_state(csv_path = out_csv, run_index = i, done = False)
 
-# create script and run. The script uses a per-run header plus the base .usq template.
+            # Build and prepare the uProcess script
             script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
             script_text = script_text.replace('\x00', '')
             script_text = script_text.replace('\n', '\r\n')
 
+            # Run the experiment
             try:
                 self.status_var.set(f'Running reservoir {i+1} at pos {pos}...')
                 self.root.update()
                 uProcess.SetScript(pipe, script_text)
                 uProcess.Run(pipe)
+                # Wait for run to complete
                 while uProcess.IsRunning(pipe):
                     time.sleep(0.5)
                     self.root.update()
@@ -789,15 +805,10 @@ class ExperimentGUI:
                 messagebox.showerror('Error', f'Run failed for reservoir {i+1}: {e}')
                 return
 
-            # after run, record csv path for later processing
+            # Record the CSV path
             individual_csvs.append(out_csv)
-            # debug: log the saved csv path
-            try:
-                print(f"Run {i+1}: saved output CSV -> {out_csv}")
-            except Exception:
-                pass
             run_params[-1]['out_csv'] = out_csv
-            # try to read basic columns for plotting later
+            # Extract flow data for plotting
             try:
                 tcol, fcol, df = extract_flow(out_csv)
                 cols = (tcol, fcol)
@@ -805,29 +816,30 @@ class ExperimentGUI:
                 cols = None
                 df = None
 
-            # no threshold check here; will perform after all runs
-
-            # plot single-run overlay (flow + pressure)
+            # Plot single-run overlay
             if isinstance(cols, tuple) and df is not None:
                 tcol, fcol = cols
-                # detect pressure column
+                # Find pressure column
                 pressure_col = None
                 for c in df.columns:
                     cl = c.lower()
                     if 'press' in cl or 'kpa' in cl:
                         pressure_col = c
                         break
+                # Generate plot file name
                 fn = out_csv.replace('.csv', '.png')
                 plot_overlay(df, tcol, fcol, pressure_col, fn, title=f'Res{i+1} trace')
 
+        # Close the pipe
         try:
             uProcess.CloseCommandPipe(pipe)
         except Exception:
             pass
 
+        # Mark live plotting as done
         self.write_live_state(csv_path = None, run_index = 0, done = True)
 
-        # after all runs: compute steady-state means and percent differences
+        # Compute steady-state averages
         exceeded = []
         for idx, p in enumerate(run_params):
             out_csv = p.get('out_csv')
@@ -836,83 +848,74 @@ class ExperimentGUI:
             avg = None
             try:
                 tcol, fcol, dfi = extract_flow(out_csv)
-                # use reservoir position to detect valve switch (V2 state) when available
+                # Compute average using dispense detection
                 avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, dispense_time_s=disp_time, position=p.get('pos'))
             except Exception:
                 avg = None
-            # debug: print computed avg info to console for investigation
-            try:
-                print(f"Compute avg for run #{idx+1}: file={out_csv}, disp_time={disp_time}, avg={avg}")
-            except Exception:
-                pass
             if avg is None:
                 self.result_vars[idx].set(f'Res{idx+1} Avg: N/A')
             else:
+                # Calculate deviation percentage
                 dev = abs(avg - desired_flow) / desired_flow * 100.0
                 self.result_vars[idx].set(f'Res{idx+1} Avg: {avg:.2f} uL/min ({dev:.1f}%)')
+                # Check if exceeds threshold
                 if dev > threshold_pct:
                     exceeded.append((idx+1, avg, dev))
 
+        # Show warning if any exceeded threshold
         if exceeded:
             msgs = [f'Res{r} avg {a:.1f} uL/min deviates {d:.1f}%' for r, a, d in exceeded]
-            messagebox.showwarning('Threshold Exceeded', 'Some reservoirs exceeded threshold:\n' + '\n'.join(msgs))
+            messagebox.showwarning('Threshold Exceeded', 'Some reservoirs exceeded input threshold:\n' + '\n'.join(msgs))
 
-        # concatenate individual CSVs into one combined file
+        # Concatenate CSVs 
         if individual_csvs:
             combined_path = os.path.join(out_dir, f"{name}_{exp_name}_{timestamp}_combined.csv")
-            # read and append using pandas (assume same columns)
             try:
-                dfs = []
-                # Read each individual CSV and offset its time column so the combined
-                # file has a continuous time axis (e.g. 0-60 then 60-120 -> 0-120).
                 dfs = []
                 cumulative_offset = 0.0
                 time_col_name = None
+                # Process each CSV
                 for fpath in individual_csvs:
                     try:
                         dfi = pd.read_csv(fpath, sep=';', skiprows=[0])
                     except Exception:
                         dfi = pd.read_csv(fpath, sep=',')
 
-                    # find a time-like column in this dataframe
+                    # Handle time columns
                     tcols = [c for c in dfi.columns if 'time' in c.lower()]
                     if tcols:
                         tcol = tcols[0]
-                        # keep original values for potential parsing
                         orig = dfi[tcol].astype(str)
                         num = pd.to_numeric(orig, errors='coerce')
                         if not num.isna().all():
                             dfi[tcol] = num
                         else:
-                            # try to parse time-of-day strings e.g. HH:MM:SS[.ms]
+                            # Parse time strings
                             parsed = pd.to_datetime(orig, errors='coerce')
                             if parsed.notna().any():
-                                # convert to seconds relative to first timestamp in this file
                                 base = parsed.iloc[0]
                                 secs = (parsed - base).dt.total_seconds()
                                 dfi[tcol] = secs
-                        # ensure numeric and drop rows with NaN times
+                        # Clean and offset time
                         dfi[tcol] = pd.to_numeric(dfi[tcol], errors='coerce')
                         dfi = dfi.dropna(subset=[tcol])
-                        # normalize to start at zero for this file, then add cumulative offset
                         if not dfi.empty:
                             min_t = float(dfi[tcol].min())
                             dfi[tcol] = dfi[tcol] - min_t + cumulative_offset
                             dfi["Total_Time"] = dfi[tcol]
                             cumulative_offset = float(dfi[tcol].max())
-                        # remember a canonical time column name (use first file's name)
+                        # Set canonical time column name
                         if time_col_name is None:
                             time_col_name = tcol
                         else:
-                            # if this file uses a different time column name, rename it
                             if tcol != time_col_name:
                                 dfi = dfi.rename(columns={tcol: time_col_name})
                     dfs.append(dfi)
 
-                # concatenate all runs into a single combined DataFrame and save it.
+                # Combine DataFrames
                 combined = pd.concat(dfs, ignore_index=True, sort=False)
                 combined.to_csv(combined_path, index=False)
-                # detect the columns we need for the combined overlay plot
+                # Detect columns for plotting
                 time_col = None
                 flow_col = None
                 pressure_col = None
@@ -925,7 +928,7 @@ class ExperimentGUI:
                     if pressure_col is None and ('press' in cl or 'pressure' in cl or 'kpa' in cl):
                         pressure_col = c
 
-                # create overlayed combined plot
+                # Create combined plot
                 if time_col and flow_col:
                     try:
                         over_png = combined_path.replace('.csv', '_overlay.png')
