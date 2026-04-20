@@ -194,7 +194,7 @@ def extract_flow(csv_file):
     return (time_col, flow_col, df)
 
 
-def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, threshold_flow=None, position=None):
+def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, position=None):
     '''
     Compute the steady state mean flow from the dispense portion of the data file.
 
@@ -207,7 +207,6 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, t
     - time_col: the name of the time column
     - flow_col: the name of the flow column
     - dispense_time_s: the time to keep the pressure on (seconds)
-    - threshold_flow: legacy parameter, currently ignored
     - position: the reservoir position used by the AV801 selector value
 
     Returns:
@@ -627,10 +626,7 @@ class ExperimentGUI:
                 self.img_label.config(image=self._calib_photo)
                 self.img_label.image = self._calib_photo
                 # hide canvas and show image instead of recomputing the plot
-                try:
-                    self.canvas.get_tk_widget().pack_forget()
-                except Exception:
-                    pass
+                self.canvas.get_tk_widget().pack_forget()
                 self.img_label.lift()
                 return
             except Exception:
@@ -662,15 +658,6 @@ class ExperimentGUI:
         self.ax.grid(True)
         self.ax.legend()
         self.canvas.draw()
-
-    def compute(self):
-        '''
-        Legacy single-reservoir compute method, not used.
-        
-        Returns: None
-        '''
-        # legacy single-reservoir compute not used
-        return None
 
     def compute_all(self):
         '''
@@ -984,11 +971,8 @@ def main():
     # Create the Tkinter root window
     root = tk.Tk()
     # Set window geometry if supported
-    try:
-        root.geometry('1400x1100')
-        root.minsize(1100, 800)
-    except Exception:
-        pass
+    root.geometry('1400x1100')
+    root.minsize(1100, 800)
     # Create an instance of ExperimentGUI
     app = ExperimentGUI(root)
     # Start the Tkinter main event loop
