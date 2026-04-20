@@ -59,42 +59,52 @@ def find_calibration_curves(calib_root):
     A dict keyed by subfolder name (the names the user sees in the GUI)
     Each value is a dict with keys: slope, intercept, r2, dir (full path to subfolder), path (full path to coeffs file), curve_csv (full path to csv), curve_png (full path to png)
     '''
+    # Initialize empty dictionary for curves
     curves = {}
+    # Check if the calibration root directory exists
     if not os.path.isdir(calib_root):
         return curves
+    # Iterate through each entry in the directory
     for entry in sorted(os.listdir(calib_root)):
         full = os.path.join(calib_root, entry)
+        # Skip if not a directory
         if not os.path.isdir(full):
             continue
+        # Initialize dictionary for this calibration
         vals = {'slope': None, 'intercept': None, 'r2': None, 'dir': full, 'path': None, 'curve_csv': None, 'curve_png': None}
         # Search the folder for the expected calibration files
         for f in os.listdir(full):
+            # Parse coefficients if coeffs file found
             if f.lower().startswith('calibration_coeffs') and f.lower().endswith('.txt'):
                 vals.update(parse_coeffs_file(os.path.join(full, f)))
                 vals['path'] = os.path.join(full, f)
+            # Set CSV path if curve file found
             if f.lower().startswith('calibration_curve') and f.lower().endswith('.csv'):
                 vals['curve_csv'] = os.path.join(full, f)
+            # Set PNG path if plot image found
             if f.lower().endswith('.png') and ('plot' in f.lower() or 'calib' in f.lower() or 'calibration' in f.lower()):
                 vals['curve_png'] = os.path.join(full, f)
         
         # Fallback values are only used so the GUI still has something to display
         # even if the calibration folder is incomplete. In normal use, real values should be present 
+        # Apply fallback values if slope/intercept missing
         if vals['slope'] is None or vals['intercept'] is None:
             # create simple dummy: flow = 5*pressure + 1
             vals['slope'] = 5.0
             vals['intercept'] = 1.0
             vals['r2'] = 1.0
+        # Add this calibration to the curves dictionary
         curves[entry] = vals
+    # Return the curves dictionary
     return curves
-
 
 def parse_coeffs_file(path):
     '''
     Read a calibration_coeffs.txt file and extract slope, intercept, and r2 values. The file is expected to have lines like:
     Expectd file format: 
-        Slope = ...
-        Intercept = ...
-        R2 = ...
+        Slope = m
+        Intercept = y
+        R2 = #
     '''
     vals = {'slope': None, 'intercept': None, 'r2': None}
     try:
@@ -311,13 +321,30 @@ class ExperimentGUI:
     - handle errors and provide feedback through the interface
     '''
     def __init__(self, root):
+        '''
+        Initialize the ExperimentGUI with the root Tkinter window.
+        
+        Sets up the main layout with left plot area and right controls,
+        initializes calibration curves, creates input fields for reservoirs,
+        and prepares for live plotting integration.
+        
+        Parameters:
+        - root: The Tkinter root window
+        
+        Returns: None
+        '''
+        # Set the root window reference
         self.root = root
+        # Set the window title
         root.title('Experiment Runner')
+        # Load available calibration curves from the directory
         self.curves = find_calibration_curves(CALIB_DIR)
 
         # Layout: left = plot, right = controls
+        # Create left frame for plot area
         left = ttk.Frame(root)
         left.grid(row=0, column=0, rowspan=20, sticky='nswe', padx=6, pady=6)
+        # Create right frame for controls
         right = ttk.Frame(root)
         right.grid(row=0, column=1, sticky='nswe', padx=6, pady=6)
 
@@ -332,61 +359,89 @@ class ExperimentGUI:
         self.canvas.get_tk_widget().pack(fill='both', expand=True)
 
         # Controls
+        # Label for calibration curve selection
         ttk.Label(right, text='Calibration Curve:').grid(row=0, column=0, sticky='w')
+        # Get sorted list of curve names
         self.curve_names = sorted(list(self.curves.keys()))
+        # Create combobox for selecting calibration curve
         self.curve_cb = ttk.Combobox(right, values=self.curve_names, state='readonly')
         self.curve_cb.grid(row=0, column=1, sticky='ew')
+        # Bind event for curve selection
         self.curve_cb.bind('<<ComboboxSelected>>', self.on_curve_selected)
 
         # Universal settings
+        # Label for threshold percentage
         ttk.Label(right, text='Threshold (%) :').grid(row=1, column=0, sticky='w')
+        # Create entry for threshold
         self.threshold_entry = tk.Entry(right)
         self.threshold_entry.insert(0, '10')
         self.threshold_entry.grid(row=1, column=1, sticky='ew')
 
+        # Label for experiment name
         ttk.Label(right, text='Experiment name:').grid(row=2, column=0, sticky='w')
+        # Create entry for experiment name
         self.output_label = tk.Entry(right)
         self.output_label.insert(0, 'exp1')
         self.output_label.grid(row=2, column=1, sticky='ew')
 
+        # Label for number of experiments
         ttk.Label(right, text='Number of experiments:').grid(row=3, column=0, sticky='w')
+        # Create variable for number of experiments
         self.num_experiments_var = tk.IntVar(value=3)
+        # Create combobox for number of experiments
         self.num_ex_cb = ttk.Combobox(right, values=list(range(1, 13)), textvariable=self.num_experiments_var, state='readonly', width=5)
         self.num_ex_cb.grid(row=3, column=1, sticky='w')
+        # Bind event for experiment count change
         self.num_ex_cb.bind('<<ComboboxSelected>>', self.on_experiment_count_changed)
 
         # Scrollable frame for reservoir controls
+        # Create container frame for scrollable area
         self.res_container = ttk.Frame(right)
         self.res_container.grid(row=4, column=0, columnspan=2, sticky='nsew')
+        # Create canvas for scrolling
         self.res_canvas = tk.Canvas(self.res_container, borderwidth=0, highlightthickness=0, height=520)
+        # Create scrollbar
         self.res_scrollbar = ttk.Scrollbar(self.res_container, orient='vertical', command=self.res_canvas.yview)
+        # Create inner frame for inputs
         self.res_inner = ttk.Frame(self.res_canvas)
+        # Bind configure event to update scroll region
         self.res_inner.bind('<Configure>', lambda e: self.res_canvas.configure(scrollregion=self.res_canvas.bbox('all')))
+        # Create window in canvas
         self.res_canvas.create_window((0, 0), window=self.res_inner, anchor='nw')
+        # Configure canvas yscroll
         self.res_canvas.configure(yscrollcommand=self.res_scrollbar.set)
+        # Grid canvas and scrollbar
         self.res_canvas.grid(row=0, column=0, sticky='nsew')
         self.res_scrollbar.grid(row=0, column=1, sticky='ns')
+        # Configure grid weights
         self.res_container.grid_rowconfigure(0, weight=1)
         self.res_container.grid_columnconfigure(0, weight=1)
 
+        # Create result frame
         self.result_frame = ttk.Frame(right)
         self.result_frame.grid(row=5, column=0, columnspan=2, sticky='w')
 
+        # Create status variable and label
         self.status_var = tk.StringVar(value='Ready')
         self.status_label = ttk.Label(right, textvariable=self.status_var)
         self.status_label.grid(row=6, column=0, columnspan=2, sticky='w')
 
+        # Create compute and run buttons
         self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
         self.compute_btn.grid(row=7, column=0, pady=6)
         self.run_btn = ttk.Button(right, text='Run Experiment', command=self.run_experiment)
         self.run_btn.grid(row=7, column=1, pady=6)
 
+        # Initialize lists for reservoirs and result variables
         self.reservoirs = []
         self.result_vars = []
+        # Build the initial reservoir input fields
         self.build_reservoir_inputs()
         
         # For live plotting
+        # Set path for live state JSON file
         self.live_state_file = os.path.join(BASE_DIR, "live_state.json")
+        # Initialize plot process variable
         self.plot_proc = None
 
     def build_reservoir_inputs(self):
@@ -439,15 +494,27 @@ class ExperimentGUI:
         self.compute_btn.configure(text=f'Compute All ({num_res} experiments)')
         self.run_btn.configure(text=f'Run Experiment ({num_res} experiments)')
 
-    # Update the number of reservoir input fields when the experiment count is changed.
     def on_experiment_count_changed(self, event=None):
+        '''
+        Update the number of reservoir input fields when the experiment count is changed.
+        Validates the count to ensure it's between 1 and 12, then rebuilds the reservoir inputs.
+        
+        Parameters:
+        - event: Tkinter event (optional, for binding)
+        
+        Returns: None
+        '''
+        # Try to get the count from the variable
         try:
             count = int(self.num_experiments_var.get())
         except Exception:
             count = 3
             self.num_experiments_var.set(count)
+        # Clamp count between 1 and 12
         count = max(1, min(12, count))
+        # Update the variable
         self.num_experiments_var.set(count)
+        # Rebuild the reservoir input fields
         self.build_reservoir_inputs()
 
     def write_live_state(self, csv_path = None, run_index = 0, done = False):
@@ -482,19 +549,28 @@ class ExperimentGUI:
     
     # Cleanly stop the live plotter before closing the GUI 
     def on_close(self):
+        '''
+        Cleanly stop the live plotter before closing the GUI.
+        
+        Writes the done state to the live state file and terminates the plot process.
+        
+        Returns: None
+        '''
+        # Write done state to live state JSON file
         try:
             self.write_live_state(csv_path = None, run_index = 0, done = True)
         except Exception:
             pass
 
+        # Terminate the live plotter process if it's running
         try:
             if self.plot_proc is not None and self.plot_proc.poll() is None:
                 self.plot_proc.terminate()
         except Exception:
             pass
 
-        self.root.destroy()
-        
+        # Destroy the root window
+        self.root.destroy()  
         
 
     def on_curve_selected(self, event=None):
@@ -557,6 +633,11 @@ class ExperimentGUI:
         self.canvas.draw()
 
     def compute(self):
+        '''
+        Legacy single-reservoir compute method, not used.
+        
+        Returns: None
+        '''
         # legacy single-reservoir compute not used
         return None
 
@@ -860,14 +941,23 @@ class ExperimentGUI:
 # Script entry point
 
 def main():
-    # Initialize the Tkinter root window and launch the main GUI application
+    '''
+    Main entry point for the application.
+    Initializes the Tkinter root window and launches the main GUI application.
+    
+    Returns: None
+    '''
+    # Create the Tkinter root window
     root = tk.Tk()
+    # Set window geometry if supported
     try:
         root.geometry('1400x1100')
         root.minsize(1100, 800)
     except Exception:
         pass
+    # Create an instance of ExperimentGUI
     app = ExperimentGUI(root)
+    # Start the Tkinter main event loop
     root.mainloop()
 
 
