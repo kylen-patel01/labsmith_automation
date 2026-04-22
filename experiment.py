@@ -33,7 +33,6 @@ from PIL import Image, ImageTk
 # uProcess hardware control wrapper
 import uProcess
 
-
 # PATH SETUP
 
 # BASE_DIR is the folder where this script lives
@@ -350,6 +349,7 @@ class ExperimentGUI:
         right.grid_columnconfigure(0, weight=0)
         right.grid_columnconfigure(1, weight=1)
         right.grid_columnconfigure(2, weight=0)
+        right.grid_columnconfigure(3, weight=0)
 
         # Plot area
         # Image label for displaying calibration png (preferred)
@@ -478,14 +478,14 @@ class ExperimentGUI:
         for i in range(num_res):
             # Calculate position in grid
             col_offset = (i % 2) * 2  # 0 for left column, 2 for right column
-            row_base = (i // 2) * 5  # 5 rows per row of experiments
+            row_base = (i // 2) * 6  # 6 rows per row of experiments (header + 5 fields)
             
             # Bold header for each experiment
             header_label = ttk.Label(self.res_inner, text=f'Experiment {i+1}', font=('TkDefaultFont', 10, 'bold'))
             header_label.grid(row=row_base, column=col_offset, columnspan=2, sticky='w', pady=2)
             
             # Position input
-            ttk.Label(self.res_inner, text='Pos (2-8):').grid(row=row_base+1, column=col_offset, sticky='w', padx=1, pady=1)
+            ttk.Label(self.res_inner, text='Valve Position (2-8):').grid(row=row_base+1, column=col_offset, sticky='w', padx=1, pady=1)
             pos = tk.Entry(self.res_inner)
             pos_val = min(8, 2 + i)
             pos.insert(0, str(pos_val))
@@ -498,19 +498,25 @@ class ExperimentGUI:
             flow.grid(row=row_base+2, column=col_offset+1, sticky='ew', padx=2, pady=1)
             
             # Volume input
-            ttk.Label(self.res_inner, text='Vol (uL):').grid(row=row_base+3, column=col_offset, sticky='w', padx=1, pady=1)
+            ttk.Label(self.res_inner, text='Dispense Volume (uL):').grid(row=row_base+3, column=col_offset, sticky='w', padx=1, pady=1)
             vol = tk.Entry(self.res_inner)
             vol.insert(0, '100')
             vol.grid(row=row_base+3, column=col_offset+1, sticky='ew', padx=2, pady=1)
             
+            # Pressure tolerance input
+            ttk.Label(self.res_inner, text='Pressure Tolerance (kPa):').grid(row=row_base+4, column=col_offset, sticky='w', padx=1, pady=1)
+            p_tol = tk.Entry(self.res_inner, width=10)
+            p_tol.insert(0, '0.1')
+            p_tol.grid(row=row_base+4, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            
             # Pressure and time labels
-            pressure_lbl = tk.StringVar(value='Pressure: N/A')
-            time_lbl = tk.StringVar(value='Time (s): N/A')
-            ttk.Label(self.res_inner, textvariable=pressure_lbl).grid(row=row_base+4, column=col_offset, sticky='w', padx=1, pady=1)
-            ttk.Label(self.res_inner, textvariable=time_lbl).grid(row=row_base+4, column=col_offset+1, sticky='w', padx=1, pady=1)
+            pressure_lbl = tk.StringVar(value='Target Pressure: N/A')
+            time_lbl = tk.StringVar(value='Dispense Time (s): N/A')
+            ttk.Label(self.res_inner, textvariable=pressure_lbl).grid(row=row_base+5, column=col_offset, sticky='w', padx=1, pady=1)
+            ttk.Label(self.res_inner, textvariable=time_lbl).grid(row=row_base+5, column=col_offset+1, sticky='w', padx=1, pady=1)
             
             # Store reservoir data
-            self.reservoirs.append({'pos': pos, 'flow': flow, 'vol': vol, 'pressure_lbl': pressure_lbl, 'time_lbl': time_lbl})
+            self.reservoirs.append({'pos': pos, 'flow': flow, 'vol': vol, 'p_tol': p_tol, 'pressure_lbl': pressure_lbl, 'time_lbl': time_lbl})
 
         # Build result labels in 2 columns
         for i in range(num_res):
@@ -691,13 +697,13 @@ class ExperimentGUI:
                 disp_time = (vol / desired_flow) * 60.0
             # update labels
             if pressure is None:
-                r['pressure_lbl'].set('Pressure: N/A')
+                r['pressure_lbl'].set('Pressure Target: N/A')
             else:
-                r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa')
+                r['pressure_lbl'].set(f'Pressure Target: {pressure:.3f} kPa')
             if disp_time is None:
                 r['time_lbl'].set('Time (s): N/A')
             else:
-                r['time_lbl'].set(f'Time (s): {disp_time:.2f}')
+                r['time_lbl'].set(f'Dispense Time (s): {disp_time:.2f}')
 
         self.status_var.set('Computed values for all reservoirs')
 
@@ -766,6 +772,7 @@ class ExperimentGUI:
                 desired_flow = float(r['flow'].get())
                 vol = float(r['vol'].get())
                 pos = int(r['pos'].get())
+                p_tol = float(r['p_tol'].get())
             except Exception:
                 messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
                 return
@@ -805,7 +812,7 @@ class ExperimentGUI:
             self.write_live_state(csv_path = out_csv, run_index = i, done = False)
 
             # Build and prepare the uProcess script
-            script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=0.1, position=pos)
+            script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=p_tol, position=pos)
             script_text = script_text.replace('\x00', '')
             script_text = script_text.replace('\n', '\r\n')
 
@@ -960,7 +967,6 @@ class ExperimentGUI:
                 self.status_var.set('Done with warnings')
 
 # Script entry point
-
 def main():
     '''
     Main entry point for the application.
@@ -977,7 +983,6 @@ def main():
     app = ExperimentGUI(root)
     # Start the Tkinter main event loop
     root.mainloop()
-
 
 if __name__ == '__main__':
     main()
