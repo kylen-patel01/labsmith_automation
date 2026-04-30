@@ -32,11 +32,10 @@ from PIL import Image, ImageTk
 
 # uProcess hardware control wrapper
 import uProcess
-
-# PATH SETUP
-
-# BASE_DIR is the folder where this script lives
-# All other paths are defined relative to this folder so the project remains portable 
+'''
+Path setup. BASE_DIR is the folder where this script lives
+All other paths are defined relative to this folder so the project remains portable
+'''
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 
 # Folder that contains saved calibration subfolders
@@ -84,14 +83,6 @@ def find_calibration_curves(calib_root):
             if f.lower().endswith('.png') and ('plot' in f.lower() or 'calib' in f.lower() or 'calibration' in f.lower()):
                 vals['curve_png'] = os.path.join(full, f)
         
-        # Fallback values are only used so the GUI still has something to display
-        # even if the calibration folder is incomplete. In normal use, real values should be present 
-        # Apply fallback values if slope/intercept missing
-        if vals['slope'] is None or vals['intercept'] is None:
-            # create simple dummy: flow = 5*pressure + 1
-            vals['slope'] = 5.0
-            vals['intercept'] = 1.0
-            vals['r2'] = 1.0
         # Add this calibration to the curves dictionary
         curves[entry] = vals
     # Return the curves dictionary
@@ -126,7 +117,8 @@ def parse_coeffs_file(path):
 
 
 # uProcess script preparation
-def build_script(target_pressure, dispense_time_s, trial_csv, p_tol=0.1, position=None):
+def build_script(target_pressure, dispense_time_s, trial_csv, p_tol=0.1, position=None, 
+                 use_thermal=False, temp_lower=None, temp_upper=None, temp_dwell=None, temp_ramp=None):
     '''
     Build the full script text that will be sent to uProcess
     
@@ -140,14 +132,31 @@ def build_script(target_pressure, dispense_time_s, trial_csv, p_tol=0.1, positio
     - trial_csv: the path where the run's output CSV should be saved (this is passed to the script so it can log data there)
     - p_tol: pressure tolerance passed into the script
     - position: reservoir position used by the AV801 selector value 
+    - use_thermal: whether to enable thermal control (boolean or 1/0)
+    - temp_lower: temperature lower bound (C)
+    - temp_upper: temperature upper bound (C)
+    - temp_dwell: thermal dwell time (s)
+    - temp_ramp: temperature ramp rate (V/s)
     '''
     header = (
         f" ;Parameters \r\n"
-        f"TargetPressure = {target_pressure} kPa\r\n"
-        f"TolerancePressure = {p_tol} kPa \r\n"
-        f"DispenseTime = {dispense_time_s} s\r\n"
-        f"OutputFile = \"{trial_csv}\"\r\n"
+        f"p_target = {target_pressure} kPa\r\n"
+        f"p_tol = {p_tol} kPa \r\n"
+        f"dispense_time = {dispense_time_s} s\r\n"
+        f"output_file = \"{trial_csv}\"\r\n"
     )
+    # Include thermal control parameters if enabled
+    if use_thermal:
+        header += (
+            f"use_thermal = 1\r\n"
+            f"temp_lower = {temp_lower} C\r\n"
+            f"temp_upper = {temp_upper} C \r\n"
+            f"temp_dwell = {temp_dwell} s\r\n"
+            f"ramp_rate = {temp_ramp} V/s\r\n"
+        )
+    else:
+        header += f"UseThermalControl = 0\r\n"
+    
     # Include reservoir position parameter if provided
     if position is not None:
         header += f"ReservoirPosition = {position}\r\n"
@@ -302,6 +311,29 @@ def plot_overlay(df, time_col, flow_col, pressure_col, out_png, title=None):
     except Exception:
         return False
 
+def plot_temperature(df, time_col, temp_col, out_png, title=None):
+    '''
+    Create a temperature vs. time plot for a single run or combined run.
+    '''
+    try:
+        fig = Figure(figsize=(8, 4))
+        ax = fig.add_subplot(111)
+        ax.plot(df[time_col], df[temp_col], color='tab:orange', linewidth=2, label='Temperature')
+        if isinstance(time_col, str) and 'time' in time_col.lower():
+            ax.set_xlabel('Time (s)')
+        else:
+            ax.set_xlabel(time_col)
+        ax.set_ylabel('Temperature (C)', color='tab:orange')
+        ax.tick_params(axis='y', labelcolor='tab:orange')
+        ax.grid(True, alpha=0.3)
+        if title:
+            ax.set_title(title)
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=150)
+        return True
+    except Exception:
+        return False
+
 # GUI CLASS
 
 class ExperimentGUI:
@@ -334,7 +366,7 @@ class ExperimentGUI:
         # Set the root window reference
         self.root = root
         # Set the window title
-        root.title('Experiment Runner')
+        root.title('uProcess Experiment Runner')
         # Load available calibration curves from the directory
         self.curves = find_calibration_curves(CALIB_DIR)
 
@@ -397,10 +429,18 @@ class ExperimentGUI:
         # Bind event for experiment count change
         self.num_ex_cb.bind('<<ComboboxSelected>>', self.on_experiment_count_changed)
 
+        # Thermal control section
+        ttk.Separator(right, orient='horizontal').grid(row=4, column=0, columnspan=4, sticky='ew', pady=5)
+        
+        # Checkbox for enabling thermal control (per-experiment basis)
+        self.thermal_enabled_var = tk.BooleanVar(value=False)
+        self.thermal_check = ttk.Checkbutton(right, text='Enable Temperature Control', variable=self.thermal_enabled_var, command=self.on_thermal_control_toggled)
+        self.thermal_check.grid(row=5, column=0, columnspan=2, sticky='w', pady=2)
+
         # Scrollable frame for reservoir controls
         # Create container frame for scrollable area
         self.res_container = ttk.Frame(right)
-        self.res_container.grid(row=4, column=0, columnspan=3, sticky='nsew')
+        self.res_container.grid(row=6, column=0, columnspan=3, sticky='nsew')
         # Create canvas for scrolling
         self.res_canvas = tk.Canvas(self.res_container, borderwidth=0, highlightthickness=0, height=520)
         # Create scrollbar
@@ -423,18 +463,24 @@ class ExperimentGUI:
 
         # Create result frame
         self.result_frame = ttk.Frame(right)
-        self.result_frame.grid(row=5, column=0, columnspan=3, sticky='w')
+        self.result_frame.grid(row=7, column=0, columnspan=3, sticky='w')
 
         # Create status variable and label
         self.status_var = tk.StringVar(value='Ready')
         self.status_label = ttk.Label(right, textvariable=self.status_var)
-        self.status_label.grid(row=6, column=0, columnspan=3, sticky='w')
+        self.status_label.grid(row=8, column=0, columnspan=3, sticky='w')
+
+        # Create notes frame for thermal control info
+        self.notes_frame = ttk.Frame(right)
+        self.notes_frame.grid(row=9, column=0, columnspan=3, sticky='w')
+        ttk.Label(self.notes_frame, text='Note: Temperature is stabilized before pressurization begins', font=('TkDefaultFont', 9, 'italic')).grid(row=0, column=0, columnspan=3, sticky='w', padx=0, pady=1)
+        ttk.Label(self.notes_frame, text='Note: Interconnect volume must be added manually to dispense volume. If dispense volume is large, consider splitting into multiple experiment runs', font=('TkDefaultFont', 9, 'italic')).grid(row=1, column=0, columnspan=3, sticky='w', padx=0, pady=1)
 
         # Create compute and run buttons
         self.compute_btn = ttk.Button(right, text='Compute All', command=self.compute_all)
-        self.compute_btn.grid(row=7, column=0, pady=6)
+        self.compute_btn.grid(row=10, column=0, pady=6)
         self.run_btn = ttk.Button(right, text='Run Experiment', command=self.run_experiment)
-        self.run_btn.grid(row=7, column=2, pady=6)
+        self.run_btn.grid(row=10, column=2, pady=6)
 
         # Initialize lists for reservoirs and result variables
         self.reservoirs = []
@@ -473,50 +519,103 @@ class ExperimentGUI:
         self.reservoirs = []
         self.result_vars = []
         num_res = self.num_experiments_var.get()
+        is_thermal_enabled = self.thermal_enabled_var.get()
+        
+        # Rows per experiment: 6 base + 4 thermal if enabled
+        rows_per_experiment = 10 if is_thermal_enabled else 6
+        spacing_rows = 2  # Extra rows between experiment pairs
+        spacing_cols = 1  # Extra columns between left/right experiments
 
         # Build input fields for each experiment in 2-column grid
         for i in range(num_res):
-            # Calculate position in grid
-            col_offset = (i % 2) * 2  # 0 for left column, 2 for right column
-            row_base = (i // 2) * 6  # 6 rows per row of experiments (header + 5 fields)
+            # Calculate position in grid with spacing
+            col_offset = (i % 2) * (2 + spacing_cols)  # Add spacing between left/right columns
+            row_base = (i // 2) * (rows_per_experiment + spacing_rows)  # Add spacing between vertical pairs
+            
+            # Create a frame for this experiment with a border
+            exp_frame = tk.Frame(self.res_inner, relief='solid', borderwidth=2, bg='white')
+            exp_frame.grid(row=row_base, column=col_offset, columnspan=2, sticky='nsew', padx=3, pady=3)
+            
+            # Configure frame grid
+            exp_frame.grid_columnconfigure(0, weight=1)
+            exp_frame.grid_columnconfigure(1, weight=1)
             
             # Bold header for each experiment
-            header_label = ttk.Label(self.res_inner, text=f'Experiment {i+1}', font=('TkDefaultFont', 10, 'bold'))
-            header_label.grid(row=row_base, column=col_offset, columnspan=2, sticky='w', pady=2)
+            header_label = ttk.Label(exp_frame, text=f'Experiment {i+1}', font=('TkDefaultFont', 10, 'bold'), background='white')
+            header_label.grid(row=0, column=0, columnspan=2, sticky='w', pady=2, padx=5)
             
             # Position input
-            ttk.Label(self.res_inner, text='Valve Position (2-8):').grid(row=row_base+1, column=col_offset, sticky='w', padx=1, pady=1)
-            pos = tk.Entry(self.res_inner)
+            ttk.Label(exp_frame, text='Valve Position (2-8):', background='white').grid(row=1, column=0, sticky='w', padx=5, pady=3)
+            pos = tk.Entry(exp_frame)
             pos_val = min(8, 2 + i)
             pos.insert(0, str(pos_val))
-            pos.grid(row=row_base+1, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            pos.grid(row=1, column=1, sticky='ew', padx=5, pady=3)
             
             # Flow input
-            ttk.Label(self.res_inner, text='Flow (uL/min):').grid(row=row_base+2, column=col_offset, sticky='w', padx=1, pady=1)
-            flow = tk.Entry(self.res_inner)
+            ttk.Label(exp_frame, text='Flow (uL/min):', background='white').grid(row=2, column=0, sticky='w', padx=5, pady=3)
+            flow = tk.Entry(exp_frame)
             flow.insert(0, '100')
-            flow.grid(row=row_base+2, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            flow.grid(row=2, column=1, sticky='ew', padx=5, pady=3)
             
             # Volume input
-            ttk.Label(self.res_inner, text='Dispense Volume (uL):').grid(row=row_base+3, column=col_offset, sticky='w', padx=1, pady=1)
-            vol = tk.Entry(self.res_inner)
+            ttk.Label(exp_frame, text='Dispense Volume (uL):', background='white').grid(row=3, column=0, sticky='w', padx=5, pady=3)
+            vol = tk.Entry(exp_frame)
             vol.insert(0, '100')
-            vol.grid(row=row_base+3, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            vol.grid(row=3, column=1, sticky='ew', padx=5, pady=3)
             
             # Pressure tolerance input
-            ttk.Label(self.res_inner, text='Pressure Tolerance (kPa):').grid(row=row_base+4, column=col_offset, sticky='w', padx=1, pady=1)
-            p_tol = tk.Entry(self.res_inner, width=10)
+            ttk.Label(exp_frame, text='Pressure Tolerance (kPa):', background='white').grid(row=4, column=0, sticky='w', padx=5, pady=3)
+            p_tol = tk.Entry(exp_frame, width=10)
             p_tol.insert(0, '0.1')
-            p_tol.grid(row=row_base+4, column=col_offset+1, sticky='ew', padx=2, pady=1)
+            p_tol.grid(row=4, column=1, sticky='ew', padx=5, pady=3)
             
             # Pressure and time labels
             pressure_lbl = tk.StringVar(value='Target Pressure: N/A')
-            time_lbl = tk.StringVar(value='Dispense Time (s): N/A')
-            ttk.Label(self.res_inner, textvariable=pressure_lbl).grid(row=row_base+5, column=col_offset, sticky='w', padx=1, pady=1)
-            ttk.Label(self.res_inner, textvariable=time_lbl).grid(row=row_base+5, column=col_offset+1, sticky='w', padx=1, pady=1)
+            time_lbl = tk.StringVar(value='Dispense Time: N/A')
+            ttk.Label(exp_frame, textvariable=pressure_lbl, font=('TkDefaultFont', 9, 'bold'), background='white').grid(row=5, column=0, sticky='w', padx=5, pady=3)
+            ttk.Label(exp_frame, textvariable=time_lbl, font=('TkDefaultFont', 9, 'bold'), background='white').grid(row=5, column=1, sticky='w', padx=5, pady=3)
+            
+            # Thermal control fields if enabled
+            temp_lower = None
+            temp_upper = None
+            temp_dwell = None
+            temp_ramp = None
+            
+            if is_thermal_enabled:
+                # Temperature Control Parameters header
+                ttk.Label(exp_frame, text='Temperature Control Parameters', font=('TkDefaultFont', 10, 'bold'), background='white').grid(row=6, column=0, columnspan=2, sticky='w', padx=5, pady=(8, 3))
+                
+                # Temperature lower bound
+                ttk.Label(exp_frame, text='Temp Lower (C):', background='white').grid(row=7, column=0, sticky='w', padx=5, pady=3)
+                temp_lower = tk.Entry(exp_frame, width=10)
+                temp_lower.insert(0, '24')
+                temp_lower.grid(row=7, column=1, sticky='ew', padx=5, pady=3)
+                
+                # Temperature upper bound
+                ttk.Label(exp_frame, text='Temp Upper (C):', background='white').grid(row=8, column=0, sticky='w', padx=5, pady=3)
+                temp_upper = tk.Entry(exp_frame, width=10)
+                temp_upper.insert(0, '26')
+                temp_upper.grid(row=8, column=1, sticky='ew', padx=5, pady=3)
+                
+                # Thermal dwell time
+                ttk.Label(exp_frame, text='Dwell Time (s):', background='white').grid(row=9, column=0, sticky='w', padx=5, pady=3)
+                temp_dwell = tk.Entry(exp_frame, width=10)
+                temp_dwell.insert(0, '60')
+                temp_dwell.grid(row=9, column=1, sticky='ew', padx=5, pady=3)
+                
+                # Temperature ramp rate
+                ttk.Label(exp_frame, text='Ramp Rate (V/s):', background='white').grid(row=10, column=0, sticky='w', padx=5, pady=3)
+                temp_ramp = tk.Entry(exp_frame, width=10)
+                temp_ramp.insert(0, '0.001')
+                temp_ramp.grid(row=10, column=1, sticky='ew', padx=5, pady=3)
             
             # Store reservoir data
-            self.reservoirs.append({'pos': pos, 'flow': flow, 'vol': vol, 'p_tol': p_tol, 'pressure_lbl': pressure_lbl, 'time_lbl': time_lbl})
+            self.reservoirs.append({
+                'pos': pos, 'flow': flow, 'vol': vol, 'p_tol': p_tol, 
+                'pressure_lbl': pressure_lbl, 'time_lbl': time_lbl,
+                'temp_lower': temp_lower, 'temp_upper': temp_upper, 
+                'temp_dwell': temp_dwell, 'temp_ramp': temp_ramp
+            })
 
         # Build result labels in 2 columns
         for i in range(num_res):
@@ -529,6 +628,7 @@ class ExperimentGUI:
         # Update button texts
         self.compute_btn.configure(text=f'Compute All ({num_res} experiments)')
         self.run_btn.configure(text=f'Run Experiment ({num_res} experiments)')
+
 
     def on_experiment_count_changed(self, event=None):
         '''
@@ -546,12 +646,18 @@ class ExperimentGUI:
         except Exception:
             count = 3
             self.num_experiments_var.set(count)
-        # Clamp count between 1 and 12
-        count = max(1, min(12, count))
-        # Update the variable
-        self.num_experiments_var.set(count)
         # Rebuild the reservoir input fields
         self.build_reservoir_inputs()
+
+    def on_thermal_control_toggled(self):
+        '''
+        Rebuild the reservoir inputs when thermal control checkbox is toggled.
+        This shows/hides the thermal fields for each experiment.
+        
+        Returns: None
+        '''
+        self.build_reservoir_inputs()
+
 
     def write_live_state(self, csv_path = None, run_index = 0, done = False):
         '''
@@ -677,7 +783,6 @@ class ExperimentGUI:
         info = self.curves[name]
         slope = info.get('slope')
         intercept = info.get('intercept')
-        # threshold exists but computeAll doesn't need it here
         for i, r in enumerate(self.reservoirs):
             try:
                 desired_flow = float(r['flow'].get())
@@ -703,9 +808,14 @@ class ExperimentGUI:
             if disp_time is None:
                 r['time_lbl'].set('Time (s): N/A')
             else:
-                r['time_lbl'].set(f'Dispense Time (s): {disp_time:.2f}')
+                r['time_lbl'].set(f'Dispense Time: {disp_time:.2f} s')
 
-        self.status_var.set('Computed values for all reservoirs')
+        # Build status message including thermal control info if enabled
+        status_msg = 'Computed values for all reservoirs'
+        if self.thermal_enabled_var.get():
+            status_msg += ' | Thermal control enabled'
+        
+        self.status_var.set(status_msg)
 
     def run_experiment(self):
         '''
@@ -754,6 +864,9 @@ class ExperimentGUI:
         except Exception:
             messagebox.showwarning('Warning', 'Invalid threshold, using 10%')
 
+        # Check if thermal control is enabled globally
+        use_thermal = self.thermal_enabled_var.get()
+
         # Initialize lists for CSV paths and run parameters
         individual_csvs = []
         run_params = []
@@ -776,6 +889,21 @@ class ExperimentGUI:
             except Exception:
                 messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
                 return
+
+            # Extract thermal parameters if enabled
+            temp_lower = None
+            temp_upper = None
+            temp_dwell = None
+            temp_ramp = None
+            if use_thermal:
+                try:
+                    temp_lower = float(r['temp_lower'].get())
+                    temp_upper = float(r['temp_upper'].get())
+                    temp_dwell = float(r['temp_dwell'].get())
+                    temp_ramp = float(r['temp_ramp'].get())
+                except Exception:
+                    messagebox.showerror('Error', f'Invalid thermal parameters for experiment {i+1}')
+                    return
 
             # Validate reservoir position
             if pos < 2 or pos > 8:
@@ -804,6 +932,7 @@ class ExperimentGUI:
             # Store run parameters
             run_params.append({'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos, 'out_csv': None})
 
+
             # Generate output CSV path
             out_csv = os.path.join(out_dir, f"{name}_RES{pos}_R{i+1}_{timestamp}.csv")
             out_csv = out_csv.replace('\\', '/')
@@ -811,8 +940,10 @@ class ExperimentGUI:
             # Update live state for this run
             self.write_live_state(csv_path = out_csv, run_index = i, done = False)
 
-            # Build and prepare the uProcess script
-            script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=p_tol, position=pos)
+            # Build and prepare the uProcess script with thermal parameters
+            script_text = build_script(pressure, int(round(disp_time)), out_csv, p_tol=p_tol, position=pos,
+                                     use_thermal=use_thermal, temp_lower=temp_lower, temp_upper=temp_upper,
+                                     temp_dwell=temp_dwell, temp_ramp=temp_ramp)
             script_text = script_text.replace('\x00', '')
             script_text = script_text.replace('\n', '\r\n')
 
@@ -854,6 +985,21 @@ class ExperimentGUI:
                 # Generate plot file name
                 fn = out_csv.replace('.csv', '.png')
                 plot_overlay(df, tcol, fcol, pressure_col, fn, title=f'Res{i+1} trace')
+            
+            # Plot temperature if thermal control is enabled and temperature column exists
+            if use_thermal and df is not None:
+                try:
+                    temp_col = None
+                    for c in df.columns:
+                        if 'T00389' in c or ('temp' in c.lower() and '(c)' in c.lower()):
+                            temp_col = c
+                            break
+                    if temp_col:
+                        temp_fn = out_csv.replace('.csv', '_temperature.png')
+                        plot_temperature(df, tcol, temp_col, temp_fn, title=f'Res{i+1} temperature')
+                except Exception:
+                    pass
+
 
         # Close the pipe
         try:
@@ -960,7 +1106,23 @@ class ExperimentGUI:
                         plot_overlay(combined, time_col, flow_col, pressure_col, over_png, title='Combined Flow & Pressure')
                     except Exception:
                         pass
+                
+                # Create combined temperature plot if thermal control was enabled
+                if use_thermal:
+                    try:
+                        temp_col = None
+                        for c in combined.columns:
+                            if 'T00389' in c or ('temp' in c.lower() and '(c)' in c.lower()):
+                                temp_col = c
+                                break
+                        if temp_col and time_col:
+                            temp_png = combined_path.replace('.csv', '_temperature.png')
+                            plot_temperature(combined, time_col, temp_col, temp_png, title='Combined Temperature')
+                    except Exception:
+                        pass
+                
                 messagebox.showinfo('Done', f'Experiment complete. Combined file: {combined_path}')
+
                 self.status_var.set('Done')
             except Exception as e:
                 messagebox.showwarning('Warning', f'Could not combine CSVs: {e}')
