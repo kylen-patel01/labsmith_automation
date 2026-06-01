@@ -51,7 +51,7 @@ Then run experiments:
 python experiment_new.py
 ```
 
-The live plotter launches automatically — no need to run it manually.
+The live plotter launches automatically- no need to run it manually.
 
 ## Output
 
