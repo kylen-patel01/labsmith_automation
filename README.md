@@ -9,18 +9,18 @@ using uProcess hardware. Built for lab use with LabSmith's pressure driven micro
 Three scripts work together:
 
 - **calibration_gui.py** — runs a pressure-to-flow calibration. You enter a 
-  pressure range and increment, and it steps through each pressure, runs 
+  pressure range and increment in a GUI, and it steps through each pressure, runs 
   trials, fits a linear curve (Flow = slope × Pressure + intercept), and saves 
   the coefficients and plot to a CalibrationData folder.
 
-- **experiment_new.py** — the main experiment GUI. You select a calibration 
-  curve, enter desired flow rates and volumes per reservoir, and it computes 
+- **experiment_new.py** — the main GUI for your project. You select a calibration 
+  curve based on your desired solution per run/reservoir, enter desired flow rates and volumes per reservoir, and it computes 
   the required pressures and dispense times, runs each reservoir in sequence 
   via uProcess, and saves individual and combined CSV/plot outputs. Optionally 
   supports thermal control with temperature stabilization before dispensing.
 
 - **live_plotter_multi.py** — launched automatically by experiment_new.py. 
-  Polls a live_state.json file and shows a scrolling real-time flow plot as 
+  Polls a live_state.json file and shows a scrolling real-time flow and temperature plot as 
   each run executes.
 
 ## Requirements
@@ -37,11 +37,11 @@ Three scripts work together:
      "uprocess_path": "C:/path/to/uProcess"
    }
 ```
-2. Place your `calibration.usq` and `experiment.usq` scripts in the project root.
+2. Place your `calibration.usq` and `experiment.usq` scripts in the project root- these are the base uProcess scripts. 
 
 ## Usage
 
-Run calibration first (if you don't have a calibration curve yet):
+Run calibration first (if you don't have a calibration curve for your solution(s) yet):
 ```bash
 python calibration_gui.py
 ```
