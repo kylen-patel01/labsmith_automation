@@ -26,6 +26,7 @@ Three scripts work together:
 
 - Python 3.10+
 - uProcess (hardware control library, must be installed separately)
+  - `import uprocess`
 - `pip install pandas numpy matplotlib pillow scikit-learn`
 
 ## Setup
