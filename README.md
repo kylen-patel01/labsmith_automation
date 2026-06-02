@@ -1,5 +1,4 @@
-# labsmith
-# LabSmith Automation
+# LabSmith Automation via Python
 
 A Python GUI toolkit for running pressure-driven fluid dispense experiments 
 using uProcess hardware. Built for lab use with LabSmith's pressure driven microfluidics system, thermal components, and SF06 flow sensor.
