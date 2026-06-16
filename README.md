@@ -3,6 +3,7 @@
 A Python GUI toolkit for running pressure-driven fluid dispense experiments 
 using uProcess hardware. Built for lab use with LabSmith's pressure driven microfluidics system, thermal components, and SF06 flow sensor.
 
+uProcess remains the hardware control layer, while Python handles run setup, calibration selection, parameter generation, file naming, plotting, and post-processing. 
 ## What it does
 
 Three scripts work together:
@@ -27,6 +28,7 @@ Three scripts work together:
 - Python 3.10+
 - uProcess (hardware control library, must be installed separately)
   - `import uprocess`
+- uProcess must be open before running the Python scripts 
 - `pip install pandas numpy matplotlib pillow scikit-learn`
 
 ## Setup
@@ -51,7 +53,7 @@ Then run experiments:
 python experiment_new.py
 ```
 
-The live plotter launches automatically- no need to run it manually.
+The live plotter launches automatically during experiment execution. 
 
 ## Output
 
