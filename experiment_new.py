@@ -126,7 +126,7 @@ def parse_coeffs_file(path):
 
 def build_script(target_pressure, dispense_time_s, trial_csv, p_tol, position=None,
                  use_thermal=False, temp_lower=None, temp_upper=None, temp_dwell=None, temp_ramp=None,
-                 hold_mode=False, hold_time_s=0.0):
+                 hold_mode=False, hold_time_s=0.0, state_output_file=None):
     '''
     Build the full script text that will be sent to uProcess.
 
@@ -157,6 +157,7 @@ def build_script(target_pressure, dispense_time_s, trial_csv, p_tol, position=No
         f'output_file = "{trial_csv}"\r\n'
         f'hold_mode = {1 if hold_mode else 0}\r\n'
         f'hold_time = {hold_time_s if hold_mode else 0} s\r\n'
+        f'state_output_file = "{state_output_file or ""}"\r\n'
     )
 
     # Always write thermal parameters- use_thermal flag tells the script whether to act on them
@@ -528,7 +529,13 @@ class ExperimentGUI:
 
             ttk.Label(exp_frame, text=f'Stage {i+1}',
                       font=('Segoe UI', 13, 'bold'), background='white').grid(
-                          row=0, column=0, columnspan=2, sticky='w', pady=2, padx=5)
+                          row=0, column=0, columnspan=1, sticky='w', pady=2, padx=5)
+
+            # Live state display for this stage (shows current readable state)
+            live_state_var = tk.StringVar(value='Waiting for start')
+            live_state_lbl = ttk.Label(exp_frame, textvariable=live_state_var,
+                                       font=('Segoe UI', 11, 'italic'), background='white')
+            live_state_lbl.grid(row=0, column=1, sticky='e', padx=5, pady=2)
 
             # Calibration Curve Selection
             ttk.Label(exp_frame, text='Calibration Curve/Solution:', background='white').grid(
@@ -548,6 +555,8 @@ class ExperimentGUI:
             pos_cb.grid(row=2, column=1, sticky='ew', padx=5, pady=3)
             fields['pos'] = pos_cb
             fields['pos_lbl'] = pos_label
+            fields['live_state_var'] = live_state_var
+            fields['live_state_widget'] = live_state_lbl
 
             specs   = [
                 ('flow',  'Flow (uL/min):',            '100'),
@@ -657,6 +666,16 @@ class ExperimentGUI:
                 fields['hold_time_lbl'].grid_remove()
                 fields['hold_time'].grid_remove()
 
+    def set_stage_status(self, index, label):
+        """Update the live-state label for a given stage index (0-based)."""
+        try:
+            if 0 <= index < len(self.reservoirs):
+                f = self.reservoirs[index]
+                if 'live_state_var' in f and f['live_state_var'] is not None:
+                    f['live_state_var'].set(label)
+        except Exception:
+            pass
+
     def on_experiment_count_changed(self, event=None):
         '''
         Rebuild the reservoir input fields when the experiment count dropdown changes.
@@ -726,6 +745,60 @@ class ExperimentGUI:
         if self.thermal_enabled_var.get():
             status += ' | Thermal control enabled'
         self.status_var.set(status)
+
+    def state_label_from_file(self, state_file):
+        """
+        Read the per-stage state file and return a human label for the latest integer state.
+        State file format: time_s;state (one row per event). Returns None if unavailable.
+        """
+        labels = {
+            0: 'Idle/starting',
+            1: 'Heating to target',
+            2: 'Temperature dwell',
+            3: 'Hold (no temp)',
+            4: 'Initializing valves',
+            5: 'Depressurizing',
+            6: 'Dumping air / retrying',
+            7: 'Refilling syringe',
+            8: 'Pressurizing',
+            9: 'Stabilizing pressure',
+            10: 'Injecting',
+            11: 'Closing / shutdown',
+            12: 'Completed stage'
+        }
+        if not state_file or not os.path.exists(state_file):
+            return None
+        try:
+            with open(state_file, 'r') as f:
+                lines = [l.strip() for l in f if l.strip()]
+            if not lines:
+                return None
+            # skip header if present
+            if lines[0].lower().startswith('time'):
+                lines = lines[1:]
+            if not lines:
+                return None
+            # Attempt to detect the system_state column by header name.
+            header = [p.strip().strip('"').lower() for p in lines[0].replace(',', ';').split(';') if p.strip()]
+            if 'system_state' in header:
+                state_index = header.index('system_state')
+            elif len(header) >= 3:
+                state_index = 2
+            else:
+                state_index = 1
+
+            last = lines[-1]
+            parts = [p.strip().strip('"') for p in last.replace(',', ';').split(';')]
+            if len(parts) <= state_index:
+                return None
+            state_field = parts[state_index]
+            try:
+                state_int = int(float(state_field))
+            except Exception:
+                return None
+            return labels.get(state_int, f'State {state_int}')
+        except Exception:
+            return None
 
     def pause_experiment(self):
         '''
@@ -843,7 +916,8 @@ class ExperimentGUI:
                     return
 
             try:
-                pos = int(r['pos'].get()) if r['pos'].get() else min(8, 2 + i)
+                pos_raw = str(r['pos'].get()).strip()
+                pos = int(pos_raw) if pos_raw.isdigit() else min(8, 2 + i)
                 threshold_pct_stage = float(r['threshold'].get())
             except Exception:
                 pos = min(8, 2 + i)
@@ -893,6 +967,15 @@ class ExperimentGUI:
             else:
                 out_csv = os.path.join(out_dir, f'{base_name}.csv').replace('\\', '/')
 
+            # Per-stage state file path (will be written by the uProcess script)
+            state_file = os.path.join(out_dir, f'{base_name}_state.csv').replace('\\', '/')
+            try:
+                # create file with header so GUI can tail it immediately
+                with open(state_file, 'w') as sf:
+                    sf.write('time_s;state\n')
+            except Exception:
+                pass
+
             if hold_mode:
                 r['pressure_lbl'].set('Pressure: N/A')
                 if use_thermal:
@@ -911,6 +994,7 @@ class ExperimentGUI:
                 'hold_mode': hold_mode, 'hold_time': hold_time_s if hold_mode else 0.0,
                 'threshold_pct': threshold_pct_stage,
                 'out_dir': out_dir,
+                'state_file': state_file,
             })
             calib_names.append(calib_name)
 
@@ -936,6 +1020,21 @@ class ExperimentGUI:
                 self.status_var.set('Experiment stopped by user')
                 break
 
+            # Mark this stage as running and ensure others are queued
+            try:
+                # Set all remaining stages to Queued if they are still at the default
+                for q in range(len(self.reservoirs)):
+                    try:
+                        if q < i:
+                            # previous stages remain as-is (may have been updated by state file)
+                            continue
+                        self.set_stage_status(q, 'Queued')
+                    except Exception:
+                        pass
+                self.set_stage_status(i, f'Running stage {i+1}')
+            except Exception:
+                pass
+
             self.write_live_state(csv_path=p['out_csv'], run_index=i)
 
             script_text = build_script(
@@ -943,7 +1042,8 @@ class ExperimentGUI:
                 p_tol=p['p_tol'], position=p['pos'], use_thermal=use_thermal,
                 temp_lower=p['temp_lower'], temp_upper=p['temp_upper'],
                 temp_dwell=p['temp_dwell'], temp_ramp=p['temp_ramp'],
-                hold_mode=p['hold_mode'], hold_time_s=p['hold_time']
+                hold_mode=p['hold_mode'], hold_time_s=p['hold_time'],
+                state_output_file=p.get('state_file')
             )
             script_text = script_text.replace('\x00', '').replace('\n', '\r\n')
 
@@ -971,11 +1071,24 @@ class ExperimentGUI:
                     
                     time.sleep(0.5)
                     self.root.update()
+                    # Tail the state file (if present) and update stage status
+                    try:
+                        state_file_path = p.get('state_file')
+                        label = self.state_label_from_file(state_file_path)
+                        if label:
+                            self.set_stage_status(i, label)
+                    except Exception:
+                        pass
                 
                 # If stop was requested, halt the experiment
                 if self.stop_requested:
                     try:
                         uProcess.Stop(self.pipe)
+                    except Exception:
+                        pass
+                    # mark current stage as stopped
+                    try:
+                        self.set_stage_status(i, 'Stopped')
                     except Exception:
                         pass
                     break
@@ -985,6 +1098,18 @@ class ExperimentGUI:
                 break
 
             individual_csvs.append(p['out_csv'])
+
+            # On normal completion, set a final status from the state file or 'Completed'
+            try:
+                final_label = self.state_label_from_file(p.get('state_file'))
+                if not final_label:
+                    final_label = 'Completed'
+                self.set_stage_status(i, final_label)
+            except Exception:
+                try:
+                    self.set_stage_status(i, 'Completed')
+                except Exception:
+                    pass
 
             # Per-run plots (flow/pressure overlay and optional temperature)
             try:
