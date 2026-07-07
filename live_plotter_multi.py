@@ -3,7 +3,7 @@ Live flow (and optional temperature) plotter for uProcess experiment runs.
 
 Reads live_state.json to know which CSV is currently active, then polls it
 and updates the plot in real time. Flow is always shown. If a temperature
-column is detected in the CSV, a second subplot is added automatically below.
+column is detected in the CSV, a second subplot is added automatically below the flow rate subplot.
 
 Usage:
     python live_plotter_multi.py <live_state.json>
