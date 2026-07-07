@@ -5,12 +5,12 @@ This script provides a Tkinter GUI that lets the user select a calibration curve
 enter desired flow and volume for multiple reservoirs, compute pressures and dispense times,
 run uProcess scripts for each reservoir, collect output CSV files, compute steady-state flow
 values, and generate individual and combined plots. Optional thermal control parameters
-can be enabled per-experiment. If enabled, the script will wait for temperature stabilization before starting the dispense and 
+can be enabled per-stage. If enabled, the script will wait for temperature stabilization before starting the dispense and 
 plots of temperature vs time will be generated alongside the flow and pressure plots. Live plots of flow and temperature
-are displayed after the experiment run has started. 
+are displayed after the stage run has started. 
 
 Author: Kylen Patel
-Last modified: 5/14/26
+Last modified: 7/2/26
 
 Used Claude AI to help write and debug this code, but all final content is original and not directly copied from any source.
 """
@@ -21,6 +21,8 @@ import time
 import sys
 import subprocess
 import json
+import tempfile
+import shutil
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -29,7 +31,6 @@ import pandas as pd
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from PIL import Image, ImageTk
 
 # uProcess hardware control wrapper
 import uProcess
@@ -124,7 +125,8 @@ def parse_coeffs_file(path):
 # uProcess Script Builder 
 
 def build_script(target_pressure, dispense_time_s, trial_csv, p_tol, position=None,
-                 use_thermal=False, temp_lower=None, temp_upper=None, temp_dwell=None, temp_ramp=None):
+                 use_thermal=False, temp_lower=None, temp_upper=None, temp_dwell=None, temp_ramp=None,
+                 hold_mode=False, hold_time_s=0.0):
     '''
     Build the full script text that will be sent to uProcess.
 
@@ -149,10 +151,12 @@ def build_script(target_pressure, dispense_time_s, trial_csv, p_tol, position=No
     '''
     header = (
         f' ;Parameters \r\n'
-        f'p_target = {target_pressure} kPa\r\n'
-        f'p_tol = {p_tol} kPa\r\n'
-        f'dispense_time = {dispense_time_s} s\r\n'
+        f'p_target = {0 if hold_mode else target_pressure} kPa\r\n'
+        f'p_tol = {0 if hold_mode else p_tol} kPa\r\n'
+        f'dispense_time = {0 if hold_mode else dispense_time_s} s\r\n'
         f'output_file = "{trial_csv}"\r\n'
+        f'hold_mode = {1 if hold_mode else 0}\r\n'
+        f'hold_time = {hold_time_s if hold_mode else 0} s\r\n'
     )
 
     # Always write thermal parameters- use_thermal flag tells the script whether to act on them
@@ -257,8 +261,8 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, p
         return None
 
     # Average over the middle half of the dispense window
-    mid_start = t_start + dispense_time_s / 4.0
-    mid_end   = t_start + 3.0 * dispense_time_s / 4.0
+    mid_start = t_start + dispense_time_s / 4.0 #1/4 of the way through the dispense time
+    mid_end   = t_start + 3.0 * dispense_time_s / 4.0 #3/4 of the way through the dispense time
     sample    = df[(df[time_col] >= mid_start) & (df[time_col] <= mid_end)]
 
     if sample.empty:
@@ -365,66 +369,78 @@ class ExperimentGUI:
         '''
         self.root = root
         root.title('uProcess Experiment Runner')
+        root.geometry('1550x1050')
+        root.minsize(1400, 900)
+
+        style = ttk.Style(root)
+        style.configure('.', font=('Segoe UI', 11))
+        style.configure('TLabel', font=('Segoe UI', 12))
+        style.configure('TButton', font=('Segoe UI', 12))
+        style.configure('TCheckbutton', font=('Segoe UI', 12))
+        style.configure('TCombobox', font=('Segoe UI', 12))
+        style.configure('TLabelframe', font=('Segoe UI', 12))
 
         self.curves          = find_calibration_curves(CALIB_DIR)
         self.live_state_file = os.path.join(BASE_DIR, 'live_state.json')
         self.plot_proc       = None
         self.reservoirs      = []
         self.result_vars     = []
+        
+        # Experiment control state variables
+        self.pipe            = None  # Current hardware pipe
+        self.is_running      = False  # True when experiment is active
+        self.is_paused       = False  # True when experiment is paused
+        self.stop_requested  = False  # Flag to stop experiment gracefully
+        
+        # File naming and solution tracking variables
+        self.include_timestamp_var = tk.BooleanVar(value=True)  # Include timestamp in individual files
+        self.save_output_var = tk.BooleanVar(value=True)  # Save CSV/plots/summary outputs to folders
+        self.solution_names = {}  # Map of reservoir position to solution name for auto-population
 
-        # Layout: left= calibration plot preview, right = all controls
-        left  = ttk.Frame(root)
-        right = ttk.Frame(root)
-        left.grid( row=0, column=0, rowspan=20, sticky='nswe', padx=6, pady=6)
-        right.grid(row=0, column=1,             sticky='nswe', padx=6, pady=6)
-        right.grid_columnconfigure(0, weight=0)
-        right.grid_columnconfigure(1, weight=1)
-        right.grid_columnconfigure(2, weight=0)
+        # Single column layout for all controls
+        main = ttk.Frame(root, padding=10)
+        main.grid(row=0, column=0, sticky='nswe', padx=6, pady=6)
+        main.grid_columnconfigure(0, weight=0)
+        main.grid_columnconfigure(1, weight=1)
+        main.grid_columnconfigure(2, weight=0)
+        root.grid_rowconfigure(0, weight=1)
+        root.grid_columnconfigure(0, weight=1)
 
-        # Calibration plot area- PNG shown if available, matplotlib canvas as fallback
-        self.img_label = tk.Label(left)
-        self.img_label.pack(fill='both', expand=True)
-        self.fig    = Figure(figsize=(5, 4))
-        self.ax     = self.fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=left)
-        self.canvas.get_tk_widget().pack(fill='both', expand=True)
+        # Global controls (Project name, Number of experiments, Thermal control)
 
-        # Global controls
+        ttk.Label(main, text='Project name:').grid(row=0, column=0, sticky='w')
+        self.output_label = tk.Entry(main)
+        self.output_label.insert(0, '')
+        self.output_label.grid(row=0, column=1, sticky='ew')
 
-        ttk.Label(right, text='Calibration Curve:').grid(row=0, column=0, sticky='w')
-        self.curve_cb = ttk.Combobox(right, values=sorted(self.curves), state='readonly')
-        self.curve_cb.grid(row=0, column=1, sticky='ew')
-        self.curve_cb.bind('<<ComboboxSelected>>', self.on_curve_selected)
-
-        ttk.Label(right, text='Threshold (%):').grid(row=1, column=0, sticky='w')
-        self.threshold_entry = tk.Entry(right)
-        self.threshold_entry.insert(0, '10')
-        self.threshold_entry.grid(row=1, column=1, sticky='ew')
-
-        ttk.Label(right, text='Experiment name:').grid(row=2, column=0, sticky='w')
-        self.output_label = tk.Entry(right)
-        self.output_label.insert(0, 'exp1')
-        self.output_label.grid(row=2, column=1, sticky='ew')
-
-        ttk.Label(right, text='Number of experiments:').grid(row=3, column=0, sticky='w')
+        ttk.Label(main, text='Number of experiments:').grid(row=1, column=0, sticky='w')
         self.num_experiments_var = tk.IntVar(value=3)
-        num_cb = ttk.Combobox(right, values=list(range(1, 13)),
-                              textvariable=self.num_experiments_var, state='readonly', width=5)
-        num_cb.grid(row=3, column=1, sticky='w')
+        num_cb = ttk.Combobox(main, values=list(range(1, 13)),
+                              textvariable=self.num_experiments_var, state='readonly', width=5,
+                              font=('Segoe UI', 12))
+        num_cb.grid(row=1, column=1, sticky='w')
         num_cb.bind('<<ComboboxSelected>>', self.on_experiment_count_changed)
 
         # Thermal control toggle
-        ttk.Separator(right, orient='horizontal').grid(row=4, column=0, columnspan=4, sticky='ew', pady=5)
+        ttk.Separator(main, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=5)
         self.thermal_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(right, text='Enable Temperature Control',
+        ttk.Checkbutton(main, text='Enable Temperature Control',
                         variable=self.thermal_enabled_var,
-                        command=self.on_thermal_control_toggled).grid(row=5, column=0, columnspan=2, sticky='w', pady=2)
+                        command=self.on_thermal_control_toggled).grid(row=2, column=0, columnspan=3, sticky='w', pady=2)
+        
+        # Include timestamp in individual files checkbox
+        ttk.Checkbutton(main, text='Include Timestamp in Individual Files',
+                        variable=self.include_timestamp_var).grid(row=3, column=0, columnspan=2, sticky='w', pady=2)
+
+        # Save output data checkbox
+        ttk.Checkbutton(main, text='Save all output data (CSV/plots/summary)',
+                        variable=self.save_output_var).grid(row=3, column=2, sticky='w', pady=2)
 
         # Scrollable reservoir input area
 
-        container       = ttk.Frame(right)
-        container.grid(row=6, column=0, columnspan=3, sticky='nsew')
-        self.res_canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0, height=520)
+        container       = ttk.Frame(main)
+        container.grid(row=4, column=0, columnspan=3, sticky='nsew', pady=(10, 0))
+        self.res_canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
         res_scrollbar   = ttk.Scrollbar(container, orient='vertical', command=self.res_canvas.yview)
         self.res_inner  = ttk.Frame(self.res_canvas)
         self.res_inner.bind('<Configure>',
@@ -432,29 +448,47 @@ class ExperimentGUI:
         self.res_canvas.create_window((0, 0), window=self.res_inner, anchor='nw')
         self.res_canvas.configure(yscrollcommand=res_scrollbar.set)
         self.res_canvas.grid(row=0, column=0, sticky='nsew')
-        res_scrollbar.grid(row=0, column=2, sticky='ns')
+        res_scrollbar.grid(row=0, column=1, sticky='ns')
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
         # Results, status, notes, and buttons
-        self.result_frame = ttk.Frame(right)
-        self.result_frame.grid(row=7, column=0, columnspan=3, sticky='w')
+        self.result_frame = ttk.Frame(main)
+        self.result_frame.grid(row=5, column=0, columnspan=3, sticky='w')
 
         self.status_var = tk.StringVar(value='Ready')
-        ttk.Label(right, textvariable=self.status_var).grid(row=8, column=0, columnspan=3, sticky='w')
+        ttk.Label(main, textvariable=self.status_var).grid(row=6, column=0, columnspan=3, sticky='w')
 
-        notes = ttk.Frame(right)
-        notes.grid(row=9, column=0, columnspan=3, sticky='w')
-        ttk.Label(notes, text='Note: Temperature is stabilized before pressurization begins',
-                  font=('TkDefaultFont', 9, 'italic')).grid(row=0, column=0, sticky='w', pady=1)
+        notes = ttk.Frame(main)
+        notes.grid(row=10, column=0, columnspan=3, sticky='w')
+        ttk.Label(notes, text='Note: Temperature has to stabilize before pressurization begins. Stabilization time is determined by the temp_dwell parameter in the script and can be set per run in this GUI.',
+                  font=('Segoe UI', 12, 'bold')).grid(row=0, column=0, sticky='w', pady=1)
         ttk.Label(notes, text='Note: Interconnect volume must be added manually to dispense volume. '
-                              'If dispense volume is large, consider splitting into multiple experiment runs',
-                  font=('TkDefaultFont', 9, 'italic')).grid(row=1, column=0, sticky='w', pady=1)
+                              'If dispense volume is large, consider splitting into multiple stage runs',
+                  font=('Segoe UI', 12, 'bold')).grid(row=1, column=0, sticky='w', pady=1)
 
-        self.compute_btn = ttk.Button(right, text='Compute All',    command=self.compute_all)
-        self.run_btn     = ttk.Button(right, text='Run Experiment', command=self.run_experiment)
-        self.compute_btn.grid(row=10, column=0, pady=6)
-        self.run_btn.grid(    row=10, column=2, pady=6)
+        # Button frame for experiment control
+        btn_frame = ttk.Frame(main)
+        btn_frame.grid(row=8, column=0, columnspan=3, sticky='ew', pady=6)
+        btn_frame.grid_columnconfigure(0, weight=1)
+        btn_frame.grid_columnconfigure(1, weight=1)
+        btn_frame.grid_columnconfigure(2, weight=1)
+        btn_frame.grid_columnconfigure(3, weight=1)
+        btn_frame.grid_columnconfigure(4, weight=1)
+
+        self.compute_btn = ttk.Button(btn_frame, text='Compute All',    command=self.compute_all)
+        self.run_btn     = ttk.Button(btn_frame, text='Stage Project', command=self.run_experiment)
+        self.pause_btn   = ttk.Button(btn_frame, text='Pause',          command=self.pause_experiment, state='disabled')
+        self.resume_btn  = ttk.Button(btn_frame, text='Resume',         command=self.resume_experiment, state='disabled')
+        self.stop_btn    = ttk.Button(btn_frame, text='Stop',           command=self.stop_experiment, state='disabled')
+        
+        self.compute_btn.grid(row=0, column=0, sticky='ew', padx=2)
+        self.run_btn.grid(    row=0, column=1, sticky='ew', padx=2)
+        self.pause_btn.grid(  row=0, column=2, sticky='ew', padx=2)
+        self.resume_btn.grid( row=0, column=3, sticky='ew', padx=2)
+        self.stop_btn.grid(   row=0, column=4, sticky='ew', padx=2)
+
+        main.grid_rowconfigure(4, weight=1)
 
         root.protocol('WM_DELETE_WINDOW', self.on_close)
         self.build_reservoir_inputs()
@@ -464,7 +498,7 @@ class ExperimentGUI:
         Build or rebuild the per-experiment input fields in the scrollable area.
 
         Lays out experiments in a 2-column grid. Each panel has a bordered frame
-        containing fields for valve position, flow, volume, and pressure tolerance.
+        containing fields for calibration curve, valve position, flow, volume, and pressure tolerance.
         When thermal control is enabled, four additional temperature fields appear.
 
         Returns: None
@@ -476,15 +510,15 @@ class ExperimentGUI:
 
         self.reservoirs  = []
         self.result_vars = []
-        n            = self.num_experiments_var.get()
+        n = self.num_experiments_var.get()
         use_thermal  = self.thermal_enabled_var.get()
-        rows_per_exp = 10 if use_thermal else 6
+        rows_per_exp = 13 if use_thermal else 9
         spacing_rows = 2
         spacing_cols = 1
 
         for i in range(n):
-            col = (i % 2) * (2 + spacing_cols)
-            row = (i // 2) * (rows_per_exp + spacing_rows)
+            col = (i % 3) * (2 + spacing_cols)
+            row = (i // 3) * (rows_per_exp + spacing_rows)
 
             # Bordered frame for each experiment panel
             exp_frame = tk.Frame(self.res_inner, relief='solid', borderwidth=2, bg='white')
@@ -492,39 +526,73 @@ class ExperimentGUI:
             exp_frame.grid_columnconfigure(0, weight=1)
             exp_frame.grid_columnconfigure(1, weight=1)
 
-            ttk.Label(exp_frame, text=f'Experiment {i+1}',
-                      font=('TkDefaultFont', 10, 'bold'), background='white').grid(
+            ttk.Label(exp_frame, text=f'Stage {i+1}',
+                      font=('Segoe UI', 13, 'bold'), background='white').grid(
                           row=0, column=0, columnspan=2, sticky='w', pady=2, padx=5)
 
-            # Core fields: valve position, flow, volume, pressure tolerance
-            fields  = {}
+            # Calibration Curve Selection
+            ttk.Label(exp_frame, text='Calibration Curve/Solution:', background='white').grid(
+                row=1, column=0, sticky='w', padx=5, pady=3)
+            calib_options = sorted(self.curves) + ['Hold']
+            calib_cb = ttk.Combobox(exp_frame, values=calib_options, state='readonly',
+                                    font=('Segoe UI', 12))
+            calib_cb.grid(row=1, column=1, sticky='ew', padx=5, pady=3)
+
+            # Core fields: valve position, flow, volume, pressure tolerance. 
+            fields  = {'calib_curve': calib_cb}
+            pos_label = ttk.Label(exp_frame, text='Reservoir Valve #:', background='white')
+            pos_label.grid(row=2, column=0, sticky='w', padx=5, pady=3)
+            pos_cb = ttk.Combobox(exp_frame, values=[str(v) for v in range(1, 9)],
+                                   state='readonly', width=8, font=('Segoe UI', 12))
+            pos_cb.set(str(min(8, 2 + i)))
+            pos_cb.grid(row=2, column=1, sticky='ew', padx=5, pady=3)
+            fields['pos'] = pos_cb
+            fields['pos_lbl'] = pos_label
+
             specs   = [
-                ('pos',   'Valve Position (2-8):',    str(min(8, 2 + i))),
                 ('flow',  'Flow (uL/min):',            '100'),
                 ('vol',   'Dispense Volume (uL):',     '100'),
                 ('p_tol', 'Pressure Tolerance (kPa):', '0.1'),
             ]
-            for r_off, (key, label, default) in enumerate(specs, start=1):
-                ttk.Label(exp_frame, text=label, background='white').grid(
-                    row=r_off, column=0, sticky='w', padx=5, pady=3)
-                entry = tk.Entry(exp_frame)
+            for r_off, (key, label, default) in enumerate(specs, start=3):
+                label_widget = ttk.Label(exp_frame, text=label, background='white')
+                label_widget.grid(row=r_off, column=0, sticky='w', padx=5, pady=3)
+                entry = tk.Entry(exp_frame, font=('Segoe UI', 11))
                 entry.insert(0, default)
                 entry.grid(row=r_off, column=1, sticky='ew', padx=5, pady=3)
                 fields[key] = entry
+                fields[f'{key}_lbl'] = label_widget
+
+            threshold_entry = tk.Entry(exp_frame, font=('Segoe UI', 11))
+            threshold_entry.insert(0, '10')
+            threshold_entry.grid_remove()
+            fields['threshold'] = threshold_entry
+
+            hold_time_lbl = ttk.Label(exp_frame, text='Hold Time (s):', background='white')
+            hold_time_entry = tk.Entry(exp_frame, font=('Segoe UI', 11))
+            hold_time_entry.insert(0, '60')
+            hold_time_lbl.grid(row=7, column=0, sticky='w', padx=5, pady=3)
+            hold_time_entry.grid(row=7, column=1, sticky='ew', padx=5, pady=3)
+            hold_time_lbl.grid_remove()
+            hold_time_entry.grid_remove()
+            fields['hold_time_lbl'] = hold_time_lbl
+            fields['hold_time'] = hold_time_entry
 
             # Computed output labels (updated by Compute All and Run Experiment)
             pressure_lbl = tk.StringVar(value='Target Pressure: N/A')
             time_lbl     = tk.StringVar(value='Dispense Time: N/A')
-            ttk.Label(exp_frame, textvariable=pressure_lbl,
-                      font=('TkDefaultFont', 9, 'bold'), background='white').grid(
-                          row=5, column=0, sticky='w', padx=5, pady=3)
-            ttk.Label(exp_frame, textvariable=time_lbl,
-                      font=('TkDefaultFont', 9, 'bold'), background='white').grid(
-                          row=5, column=1, sticky='w', padx=5, pady=3)
+            pressure_widget = ttk.Label(exp_frame, textvariable=pressure_lbl,
+                      font=('Segoe UI', 11, 'bold'), background='white')
+            pressure_widget.grid(row=8, column=0, sticky='w', padx=5, pady=3)
+            time_widget = ttk.Label(exp_frame, textvariable=time_lbl,
+                      font=('Segoe UI', 11, 'bold'), background='white')
+            time_widget.grid(row=8, column=1, sticky='w', padx=5, pady=3)
             fields['pressure_lbl'] = pressure_lbl
             fields['time_lbl']     = time_lbl
+            fields['pressure_widget'] = pressure_widget
+            fields['time_widget'] = time_widget
 
-            # Optional thermal control fields
+            # Optional thermal control fields. These are the default values
             thermal_specs = [
                 ('temp_lower', 'Temp Lower (C):',  '24'),
                 ('temp_upper', 'Temp Upper (C):',  '26'),
@@ -533,12 +601,12 @@ class ExperimentGUI:
             ]
             if use_thermal:
                 ttk.Label(exp_frame, text='Temperature Control Parameters',
-                          font=('TkDefaultFont', 10, 'bold'), background='white').grid(
-                              row=6, column=0, columnspan=2, sticky='w', padx=5, pady=(8, 3))
-                for t_off, (key, label, default) in enumerate(thermal_specs, start=7):
+                          font=('Segoe UI', 12, 'bold'), background='white').grid(
+                              row=9, column=0, columnspan=2, sticky='w', padx=5, pady=(8, 3))
+                for t_off, (key, label, default) in enumerate(thermal_specs, start=10):
                     ttk.Label(exp_frame, text=label, background='white').grid(
                         row=t_off, column=0, sticky='w', padx=5, pady=3)
-                    entry = tk.Entry(exp_frame, width=10)
+                    entry = tk.Entry(exp_frame, width=12, font=('Segoe UI', 11))
                     entry.insert(0, default)
                     entry.grid(row=t_off, column=1, sticky='ew', padx=5, pady=3)
                     fields[key] = entry
@@ -546,17 +614,48 @@ class ExperimentGUI:
                 for key, _, _ in thermal_specs:
                     fields[key] = None
 
+            calib_cb.bind('<<ComboboxSelected>>', lambda event, f=fields: self._update_hold_field_visibility(f))
+            self._update_hold_field_visibility(fields)
+
             self.reservoirs.append(fields)
 
-        # Result labels shown below the reservoir grid, 2 per row
+        # Result labels shown below the reservoir grid, 3 per row
         for i in range(n):
-            rv = tk.StringVar(value=f'Experiment {i+1} Steady-State Avg: N/A (% difference from desired flow: N/A)')
+            rv = tk.StringVar(value=f'Stage {i+1} Steady-State Avg: N/A (% difference from desired flow: N/A) ||')
             ttk.Label(self.result_frame, textvariable=rv).grid(
-                row=i//2, column=i%2, sticky='w', padx=2, pady=1)
+                row=i//3, column=i%3, sticky='w', padx=2, pady=1)
             self.result_vars.append(rv)
 
-        self.compute_btn.configure(text=f'Compute All ({n} experiments)')
-        self.run_btn.configure(    text=f'Run Experiment ({n} experiments)')
+        self.compute_btn.configure(text=f'Compute All ({n} stages)')
+        self.run_btn.configure(    text=f'Execute Project ({n} stages)')
+
+    def _update_hold_field_visibility(self, fields):
+        is_hold = fields['calib_curve'].get() == 'Hold'
+        use_thermal = self.thermal_enabled_var.get()
+
+        for key in ['pos_lbl', 'pos', 'flow_lbl', 'flow', 'vol_lbl', 'vol', 'p_tol_lbl', 'p_tol']:
+            if key in fields:
+                widget = fields[key]
+                if is_hold:
+                    widget.grid_remove()
+                else:
+                    widget.grid()
+
+        if 'pressure_widget' in fields:
+            if is_hold:
+                fields['pressure_widget'].grid_remove()
+                fields['time_widget'].grid_remove()
+            else:
+                fields['pressure_widget'].grid()
+                fields['time_widget'].grid()
+
+        if 'hold_time_lbl' in fields:
+            if is_hold and not use_thermal:
+                fields['hold_time_lbl'].grid()
+                fields['hold_time'].grid()
+            else:
+                fields['hold_time_lbl'].grid_remove()
+                fields['hold_time'].grid_remove()
 
     def on_experiment_count_changed(self, event=None):
         '''
@@ -578,92 +677,43 @@ class ExperimentGUI:
         '''
         self.build_reservoir_inputs()
 
-    def on_curve_selected(self, event=None):
-        '''
-        Display the selected calibration curve in the left plot panel.
-
-        Shows the PNG image if one exists for the selected calibration.
-        Otherwise, draws the linear fit (and raw data points if a CSV is present)
-        on the embedded matplotlib canvas.
-
-        Parameters:
-        - event: Tkinter combobox event (unused, required for binding)
-
-        Returns: None
-        '''
-        name = self.curve_cb.get()
-        if not name:
-            return
-        info      = self.curves.get(name, {})
-        slope     = info.get('slope')
-        intercept = info.get('intercept')
-
-        # Show PNG if available
-        png = info.get('curve_png')
-        if png and os.path.exists(png):
-            try:
-                img = Image.open(png).resize((600, 400), Image.LANCZOS)
-                self._calib_photo = ImageTk.PhotoImage(img)
-                self.img_label.config(image=self._calib_photo)
-                self.img_label.image = self._calib_photo
-                self.canvas.get_tk_widget().pack_forget()
-                self.img_label.lift()
-                return
-            except Exception:
-                pass
-
-        # Fallback: draw the linear fit on the matplotlib canvas
-        try:
-            self.img_label.config(image='')
-            self.img_label.pack_forget()
-        except Exception:
-            pass
-        self.canvas.get_tk_widget().pack(fill='both', expand=True)
-        self.ax.clear()
-        x = np.linspace(0, 10, 100)
-        self.ax.plot(x, slope * x + intercept, label='Linear fit')
-
-        csv = info.get('curve_csv')
-        if csv and os.path.exists(csv):
-            try:
-                dfc = pd.read_csv(csv)
-                if 'Pressure_kPa' in dfc.columns and 'Flow_uLmin' in dfc.columns:
-                    self.ax.scatter(dfc['Pressure_kPa'], dfc['Flow_uLmin'], color='C1', label='data')
-            except Exception:
-                pass
-
-        self.ax.set_xlabel('Pressure (kPa)')
-        self.ax.set_ylabel('Flow (uL/min)')
-        self.ax.set_title(f'Calibration: {name}')
-        self.ax.grid(True)
-        self.ax.legend()
-        self.canvas.draw()
-
     def compute_all(self):
         '''
         Preview the required pressure and dispense time for all experiments.
 
         Back-calculates pressure from the desired flow using the calibration equation
-        (flow = slope * pressure + intercept). Dispense time is derived from volume / flow.
+        (flow = slope * pressure + intercept) for each experiment's selected calibration.
+        Dispense time is derived from volume / flow.
         Results are displayed in the GUI labels without running any hardware.
 
         Returns: None
         '''
-        name = self.curve_cb.get()
-        if not name:
-            messagebox.showerror('Error', 'Select a calibration curve first')
-            return
-
-        info      = self.curves[name]
-        slope     = info.get('slope')
-        intercept = info.get('intercept')
-
         for i, r in enumerate(self.reservoirs):
+            calib_name = r['calib_curve'].get()
+            if not calib_name:
+                messagebox.showerror('Error', f'Stage {i+1}: Select a calibration curve/solution')
+                return
+
+            if calib_name == 'Hold':
+                hold_time_value = 0.0
+                try:
+                    hold_time_value = float(r['hold_time'].get()) if not self.thermal_enabled_var.get() else 0.0
+                except Exception:
+                    messagebox.showerror('Error', f'Invalid hold time for stage {i+1}')
+                    return
+                r['pressure_lbl'].set('Pressure Target: N/A')
+                r['time_lbl'].set(f'Hold Time: {hold_time_value:.2f} s')
+                continue
+
+            info      = self.curves[calib_name]
+            slope     = info.get('slope')
+            intercept = info.get('intercept')
+
             try:
                 desired_flow = float(r['flow'].get())
                 vol = float(r['vol'].get())
             except Exception:
-                messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
+                messagebox.showerror('Error', f'Invalid inputs for stage {i+1}')
                 return
 
             pressure  = (desired_flow - intercept) / slope if slope != 0 else None
@@ -677,12 +727,73 @@ class ExperimentGUI:
             status += ' | Thermal control enabled'
         self.status_var.set(status)
 
+    def pause_experiment(self):
+        '''
+        Pause the currently running experiment.
+        
+        When paused, the uProcess hardware holds the current state and CSV data
+        collection is suspended. Use resume_experiment to continue from this point.
+
+        Returns: None
+        '''
+        if self.pipe is not None and self.is_running:
+            try:
+                uProcess.Pause(self.pipe)
+                self.is_paused = True
+                self.status_var.set('Experiment paused')
+                self.pause_btn.configure(state='disabled')
+                self.resume_btn.configure(state='normal')
+                self.stop_btn.configure(state='normal')
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to pause experiment: {e}')
+
+    def resume_experiment(self):
+        '''
+        Resume a paused experiment.
+        
+        Resumes the paused experiment from where it was paused. CSV data collection
+        will continue to populate the same file without interruption.
+
+        Returns: None
+        '''
+        if self.pipe is not None and self.is_paused:
+            try:
+                uProcess.Pause(self.pipe)
+                self.is_paused = False
+                self.status_var.set('Experiment resumed')
+                self.pause_btn.configure(state='normal')
+                self.resume_btn.configure(state='disabled')
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to resume experiment: {e}')
+
+    def stop_experiment(self):
+        '''
+        Stop the currently running experiment and save all data.
+        
+        Stops the hardware and gracefully terminates the experiment. All CSV data
+        collected so far is saved to the output folder. The stop can be initiated
+        from either running or paused states.
+
+        Returns: None
+        '''
+        if self.pipe is not None:
+            try:
+                uProcess.Stop(self.pipe)
+                self.stop_requested = True
+                self.status_var.set('Experiment stopping...')
+                self.pause_btn.configure(state='disabled')
+                self.resume_btn.configure(state='disabled')
+                self.stop_btn.configure(state='disabled')
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to stop experiment: {e}')
+
     def run_experiment(self):
         '''
         Run all configured experiments sequentially through uProcess.
 
         For each experiment:
-        - Validates inputs and computes required pressure and dispense time
+        - Validates inputs and uses the experiment's selected calibration curve
+        - Computes required pressure and dispense time
         - Builds the uProcess script (with optional thermal parameters)
         - Sends the script to hardware and waits for completion
         - Saves per-run flow/pressure plots (and temperature plots if enabled)
@@ -695,24 +806,13 @@ class ExperimentGUI:
 
         Returns: None
         '''
-        name = self.curve_cb.get()
-        if not name:
-            messagebox.showerror('Error', 'Select a calibration curve first')
-            return
-
-        info      = self.curves[name]
-        slope     = info.get('slope')
-        intercept = info.get('intercept')
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         exp_name  = self.output_label.get().strip() or timestamp
-        out_dir   = os.path.join(BASE_DIR, 'ExperimentData', name, exp_name)
-        os.makedirs(out_dir, exist_ok=True)
+        save_output = self.save_output_var.get()
+        temp_output_root = None
 
-        try:
-            threshold_pct = float(self.threshold_entry.get())
-        except Exception:
-            messagebox.showwarning('Warning', 'Invalid threshold — using 10%')
-            threshold_pct = 10.0
+        if not save_output:
+            temp_output_root = tempfile.mkdtemp(prefix='demo_output_', dir=BASE_DIR)
 
         use_thermal = self.thermal_enabled_var.get()
 
@@ -722,22 +822,15 @@ class ExperimentGUI:
         # Validate all inputs up front before opening the hardware pipe
         run_params      = []
         individual_csvs = []
+        calib_names     = []  # Track calibration names for output organization
 
         for i, r in enumerate(self.reservoirs):
-            try:
-                desired_flow = float(r['flow'].get())
-                vol          = float(r['vol'].get())
-                pos          = int(r['pos'].get())
-                p_tol        = float(r['p_tol'].get())
-            except Exception:
-                messagebox.showerror('Error', f'Invalid inputs for experiment {i+1}')
+            calib_name = r['calib_curve'].get()
+            if not calib_name:
+                messagebox.showerror('Error', f'Stage {i+1}: Select a calibration curve or Hold')
                 return
 
-            if not (2 <= pos <= 8):
-                messagebox.showerror('Error', f'Experiment {i+1}: valve position must be 2–8')
-                return
-
-            # Read thermal parameters only if thermal control is enabled
+            hold_mode = calib_name == 'Hold'
             temp_lower = temp_upper = temp_dwell = temp_ramp = None
             if use_thermal:
                 try:
@@ -746,51 +839,149 @@ class ExperimentGUI:
                     temp_dwell = float(r['temp_dwell'].get())
                     temp_ramp  = float(r['temp_ramp'].get())
                 except Exception:
-                    messagebox.showerror('Error', f'Invalid thermal parameters for experiment {i+1}')
+                    messagebox.showerror('Error', f'Invalid thermal parameters for stage {i+1}')
                     return
 
-            pressure  = (desired_flow - intercept) / slope if slope != 0 else 0.0
-            disp_time = (vol / desired_flow) * 60.0         if desired_flow > 0 else 0.0
-            out_csv   = os.path.join(out_dir, f'{name}_RES{pos}_R{i+1}_{timestamp}.csv').replace('\\', '/')
+            try:
+                pos = int(r['pos'].get()) if r['pos'].get() else min(8, 2 + i)
+                threshold_pct_stage = float(r['threshold'].get())
+            except Exception:
+                pos = min(8, 2 + i)
+                threshold_pct_stage = 10.0
 
-            r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa' if slope != 0 else 'Pressure: N/A')
-            r['time_lbl'].set(f'Time (s): {disp_time:.2f}')
+            if not (2 <= pos <= 8):
+                pos = max(2, min(8, pos))
+
+            if hold_mode:
+                try:
+                    hold_time_s = float(r['hold_time'].get()) if not use_thermal else float(temp_dwell)
+                except Exception:
+                    messagebox.showerror('Error', f'Invalid hold time for stage {i+1}')
+                    return
+                desired_flow = 0.0
+                vol = 0.0
+                p_tol = 0.0
+                pressure = 0.0
+                disp_time = 0.0
+            else:
+                try:
+                    desired_flow = float(r['flow'].get())
+                    vol          = float(r['vol'].get())
+                    p_tol        = float(r['p_tol'].get())
+                except Exception:
+                    messagebox.showerror('Error', f'Invalid inputs for stage {i+1}')
+                    return
+                info      = self.curves[calib_name]
+                slope     = info.get('slope')
+                intercept = info.get('intercept')
+                pressure  = (desired_flow - intercept) / slope if slope != 0 else 0.0
+                disp_time = (vol / desired_flow) * 60.0         if desired_flow > 0 else 0.0
+            
+            # Create output directory using the project name as the top-level folder.
+            # In demo mode, send outputs to a temporary folder so no persistent files are left behind.
+            out_dir = os.path.join(BASE_DIR, 'ExperimentData', exp_name)
+            if not save_output:
+                out_dir = temp_output_root
+            os.makedirs(out_dir, exist_ok=True)
+            
+            # Construct filename: projectname_Res#_Run#_(optional timestamp).csv
+            include_ts = self.include_timestamp_var.get()
+            base_name = f'{exp_name}_Stage{i+1}_Res{pos}'
+            
+            if include_ts:
+                out_csv = os.path.join(out_dir, f'{base_name}_{timestamp}.csv').replace('\\', '/')
+            else:
+                out_csv = os.path.join(out_dir, f'{base_name}.csv').replace('\\', '/')
+
+            if hold_mode:
+                r['pressure_lbl'].set('Pressure: N/A')
+                if use_thermal:
+                    r['time_lbl'].set(f'Hold Time (s): {hold_time_s:.2f}')
+                else:
+                    r['time_lbl'].set(f'Hold Time (s): {hold_time_s:.2f}')
+            else:
+                r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa' if slope != 0 else 'Pressure: N/A')
+                r['time_lbl'].set(f'Time (s): {disp_time:.2f}')
 
             run_params.append({
                 'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos,
                 'p_tol': p_tol, 'pressure': pressure, 'out_csv': out_csv,
                 'temp_lower': temp_lower, 'temp_upper': temp_upper,
                 'temp_dwell': temp_dwell, 'temp_ramp': temp_ramp,
+                'hold_mode': hold_mode, 'hold_time': hold_time_s if hold_mode else 0.0,
+                'threshold_pct': threshold_pct_stage,
+                'out_dir': out_dir,
             })
+            calib_names.append(calib_name)
 
         # Open a single hardware pipe shared across all runs
         try:
-            pipe = uProcess.OpenCommandPipe()
+            self.pipe = uProcess.OpenCommandPipe()
         except Exception as e:
             messagebox.showerror('Error', f'Could not open uProcess pipe: {e}')
             return
 
+        # Set initial state and enable control buttons
+        self.is_running = True
+        self.is_paused = False
+        self.stop_requested = False
+        self.run_btn.configure(state='disabled')
+        self.pause_btn.configure(state='normal')
+        self.resume_btn.configure(state='disabled')
+        self.stop_btn.configure(state='normal')
+
         for i, p in enumerate(run_params):
+            # Check if user requested stop
+            if self.stop_requested:
+                self.status_var.set('Experiment stopped by user')
+                break
+
             self.write_live_state(csv_path=p['out_csv'], run_index=i)
 
             script_text = build_script(
                 p['pressure'], int(round(p['disp_time'])), p['out_csv'],
                 p_tol=p['p_tol'], position=p['pos'], use_thermal=use_thermal,
                 temp_lower=p['temp_lower'], temp_upper=p['temp_upper'],
-                temp_dwell=p['temp_dwell'], temp_ramp=p['temp_ramp']
+                temp_dwell=p['temp_dwell'], temp_ramp=p['temp_ramp'],
+                hold_mode=p['hold_mode'], hold_time_s=p['hold_time']
             )
             script_text = script_text.replace('\x00', '').replace('\n', '\r\n')
 
             try:
-                self.status_var.set(f"Running experiment {i+1} at valve position {p['pos']}…")
+                self.status_var.set(f"Running stage {i+1} at reservoir valve # {p['pos']}…")
                 self.root.update()
-                uProcess.SetScript(pipe, script_text)
-                uProcess.Run(pipe)
-                while uProcess.IsRunning(pipe):
+                uProcess.SetScript(self.pipe, script_text)
+                uProcess.Run(self.pipe)
+                
+                # Monitor the running experiment, handle pause/resume/stop
+                while uProcess.IsRunning(self.pipe) and not self.stop_requested:
+                    # Handle pause state
+                    while self.is_paused and not self.stop_requested:
+                        self.status_var.set(f"Experiment {i+1} paused at valve position {p['pos']}")
+                        time.sleep(0.5)
+                        self.root.update()
+                    
+                    # If stop was requested while paused, exit
+                    if self.stop_requested:
+                        break
+                    
+                    # Check if still running
+                    if not uProcess.IsRunning(self.pipe):
+                        break
+                    
                     time.sleep(0.5)
                     self.root.update()
+                
+                # If stop was requested, halt the experiment
+                if self.stop_requested:
+                    try:
+                        uProcess.Stop(self.pipe)
+                    except Exception:
+                        pass
+                    break
+                    
             except Exception as e:
-                messagebox.showerror('Error', f'Run failed for experiment {i+1}: {e}')
+                messagebox.showerror('Error', f'Stage failed for stage {i+1}: {e}')
                 break
 
             individual_csvs.append(p['out_csv'])
@@ -815,54 +1006,198 @@ class ExperimentGUI:
                 pass
 
         try:
-            uProcess.CloseCommandPipe(pipe)
+            uProcess.CloseCommandPipe(self.pipe)
         except Exception:
             pass
 
+        # Reset state variables and button states
+        self.is_running = False
+        self.is_paused = False
+        self.stop_requested = False
+        self.pipe = None
+        self.run_btn.configure(state='normal')
+        self.pause_btn.configure(state='disabled')
+        self.resume_btn.configure(state='disabled')
+        self.stop_btn.configure(state='disabled')
+
         self.write_live_state(done=True)
 
-        # Steady-state flow analysis
+        # Steady-state flow analysis and results collection
+        results = []
         exceeded = []
         for idx, p in enumerate(run_params):
+            if p['hold_mode']:
+                self.result_vars[idx].set(f'Stage {idx+1} Hold Time: {p["hold_time"]:.2f} s')
+                results.append({'avg_flow': None, 'dev_pct': None, 'desired_flow': p['desired_flow'], 'hold_time': p['hold_time']})
+                continue
             try:
                 tcol, fcol, dfi = extract_flow(p['out_csv'])
                 avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, p['disp_time'], p['pos'])
             except Exception:
                 avg = None
 
+            dev = None
             if avg is None:
-                self.result_vars[idx].set(f'Res{idx+1} Avg: N/A')
+                self.result_vars[idx].set(f'Stage {idx+1} Avg: N/A')
             else:
                 dev = abs(avg - p['desired_flow']) / p['desired_flow'] * 100.0
-                self.result_vars[idx].set(f'Res{idx+1} Avg: {avg:.2f} uL/min ({dev:.1f}%)')
-                if dev > threshold_pct:
+                self.result_vars[idx].set(f'Stage {idx+1} Avg: {avg:.2f} uL/min ({dev:.1f}%)')
+                if dev > p['threshold_pct']:
                     exceeded.append((idx+1, avg, dev))
+            
+            results.append({'avg_flow': avg, 'dev_pct': dev, 'desired_flow': p['desired_flow'], 'hold_time': None})
 
         if exceeded:
-            msgs = [f'Res{r} avg {a:.1f} uL/min deviates {d:.1f}%' for r, a, d in exceeded]
+            msgs = [f'Stage {r} avg {a:.1f} uL/min deviates {d:.1f}%' for r, a, d in exceeded]
             messagebox.showwarning('Threshold Exceeded',
-                                   'Some reservoirs exceed desired threshold:\n' + '\n'.join(msgs))
+                                   'Some stages exceed the desired threshold:\n' + '\n'.join(msgs))
 
-        # Combine all CSVs into one file with a continuous time axis
-        if individual_csvs:
-            self._combine_and_save(individual_csvs, out_dir, name, exp_name, timestamp, use_thermal)
+        # Save experiment summary and combined outputs only when the user wants persistent data.
+        if save_output:
+            summary_threshold = max((p['threshold_pct'] for p in run_params if p.get('threshold_pct') is not None), default=10.0)
+            self._save_experiment_summary(run_params, results, exp_name, timestamp, use_thermal, summary_threshold)
 
-    def _combine_and_save(self, csv_paths, out_dir, name, exp_name, timestamp, use_thermal):
+            # Combine all CSVs into one file with a continuous time axis
+            if individual_csvs:
+                self._combine_and_save(individual_csvs, run_params, exp_name, timestamp, use_thermal)
+        else:
+            self.status_var.set('Demo run complete. Temporary output files were not saved.')
+
+        if temp_output_root and not save_output:
+            try:
+                shutil.rmtree(temp_output_root, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _save_experiment_summary(self, run_params, results, exp_name, timestamp, use_thermal, threshold_pct):
+        '''
+        Save a text summary of the experiment parameters and results.
+        
+        Creates a .txt file in the first experiment's output directory containing:
+        - Experiment metadata (name, date/time, settings)
+        - Per-experiment parameters (calibration, valve position, flow, volume, etc.)
+        - Per-experiment results (steady-state flow, deviation from desired)
+        - Summary statistics and threshold violations
+
+        Parameters:
+        - run_params:   list of run parameter dicts with all experimental settings
+        - results:      list of result dicts with avg_flow, dev_pct, desired_flow
+        - exp_name:     experiment name/project name
+        - timestamp:    run timestamp string
+        - use_thermal:  whether thermal control was enabled
+        - threshold_pct: deviation threshold percentage
+
+        Returns: None
+        '''
+        if not run_params:
+            return
+        
+        # Save in the first experiment's output directory
+        out_dir = run_params[0]['out_dir']
+        summary_file = os.path.join(out_dir, f'{exp_name}_summary.txt')
+        
+        try:
+            with open(summary_file, 'w') as f:
+                # Header
+                f.write('=' * 80 + '\n')
+                f.write('PROJECT SUMMARY\n')
+                f.write('=' * 80 + '\n\n')
+                
+                # Experiment metadata
+                f.write('PROJECT DATA SUMMARY\n')
+                f.write('-' * 80 + '\n')
+                f.write(f'Project Name:           {exp_name}\n')
+                f.write(f'Timestamp:              {timestamp}\n')
+                f.write(f'Thermal Control:        {"Enabled" if use_thermal else "Disabled"}\n')
+                f.write(f'Deviation Threshold:    {threshold_pct}%\n')
+                f.write(f'Number of Stages:  {len(run_params)}\n')
+                f.write('\n')
+                
+                # Per-experiment parameters and results
+                f.write('STAGE DETAILS\n')
+                f.write('-' * 80 + '\n\n')
+                
+                for i, (p, r) in enumerate(zip(run_params, results)):
+                    f.write(f'Stage {i+1}\n')
+                    f.write('  Parameters:\n')
+                    f.write(f'    Calibration Curve:    {os.path.basename(p["out_dir"]) if "out_dir" in p else "N/A"}\n')
+                    f.write(f'    Valve Position:       {p["pos"]}\n')
+                    f.write(f'    Desired Flow:         {p["desired_flow"]:.2f} µL/min\n')
+                    f.write(f'    Dispense Volume:      {p["desired_flow"] * p["disp_time"] / 60:.2f} µL\n')
+                    f.write(f'    Target Pressure:      {p["pressure"]:.3f} kPa\n')
+                    f.write(f'    Pressure Tolerance:   {p["p_tol"]:.3f} kPa\n')
+                    f.write(f'    Dispense Time:        {p["disp_time"]:.2f} s\n')
+                    
+                    if use_thermal:
+                        f.write(f'    Temp Lower Bound:     {p.get("temp_lower", "N/A")} °C\n')
+                        f.write(f'    Temp Upper Bound:     {p.get("temp_upper", "N/A")} °C\n')
+                        f.write(f'    Thermal Dwell Time:   {p.get("temp_dwell", "N/A")} s\n')
+                        f.write(f'    Temperature Ramp:     {p.get("temp_ramp", "N/A")} V/s\n')
+                    
+                    f.write('  Results:\n')
+                    if p['hold_mode']:
+                        f.write(f'    Hold Time:            {p["hold_time"]:.2f} s\n')
+                        f.write(f'    Steady-State Flow:    N/A\n')
+                        f.write(f'    Deviation:            N/A\n')
+                    elif r['avg_flow'] is None:
+                        f.write(f'    Steady-State Flow:    N/A\n')
+                        f.write(f'    Deviation:            N/A\n')
+                    else:
+                        f.write(f'    Steady-State Flow:    {r["avg_flow"]:.2f} µL/min\n')
+                        dev_status = ''
+                        if r['dev_pct'] > threshold_pct:
+                            dev_status = 'EXCEEDS DESIRED THRESHOLD'
+                        f.write(f'    Deviation:            {r["dev_pct"]:.2f}% from desired{dev_status}\n')
+                    
+                    csv_path = p.get('out_csv', 'N/A')
+                    f.write(f'    Output CSV:           {os.path.basename(csv_path)}\n')
+                    f.write('\n')
+                
+                # Summary statistics
+                f.write('SUMMARY STATISTICS\n')
+                f.write('-' * 80 + '\n')
+                
+                valid_flows = [r['avg_flow'] for r in results if r['avg_flow'] is not None]
+                valid_devs = [r['dev_pct'] for r in results if r['dev_pct'] is not None]
+                
+                if valid_flows:
+                    f.write(f'Average Steady-State Flow:  {np.mean(valid_flows):.2f} µL/min\n')
+                    f.write(f'Min Steady-State Flow:      {np.min(valid_flows):.2f} µL/min\n')
+                    f.write(f'Max Steady-State Flow:      {np.max(valid_flows):.2f} µL/min\n')
+                
+                if valid_devs:
+                    exceeded_count = sum(1 for d in valid_devs if d > threshold_pct)
+                    f.write(f'Stages Exceeding Desired Flow Threshold: {exceeded_count}/{len(results)}\n')
+                
+                f.write('\n' + '=' * 80 + '\n')
+                
+        except Exception as e:
+            print(f'Error saving experiment summary: {e}')
+
+    def _combine_and_save(self, csv_paths, run_params, exp_name, timestamp, use_thermal):
         '''
         Concatenate individual run CSVs into one file with a continuous time axis.
         Saves combined flow/pressure and (if enabled) temperature overlay plots.
 
+        Since experiments may use different calibration curves, save combined files
+        in each experiment's respective output directory.
+
         Parameters:
         - csv_paths:   list of paths to individual run CSV files
-        - out_dir:     output directory for the combined file
-        - name:        calibration curve name (used in the filename)
+        - run_params:  list of run parameter dicts containing out_dir for each run
         - exp_name:    experiment name (used in the filename)
         - timestamp:   run timestamp string (used in the filename)
         - use_thermal: whether to also save a combined temperature plot
 
         Returns: None
         '''
-        combined_path = os.path.join(out_dir, f'{name}_{exp_name}_{timestamp}_combined.csv')
+        # Save combined file in the first experiment's directory (or combine all)
+        if not run_params:
+            return
+        
+        out_dir = run_params[0]['out_dir']
+        combined_path = os.path.join(out_dir, f'{exp_name}_{timestamp}_combined.csv')
+        
         try:
             dfs, offset, time_col_name = [], 0.0, None
 
@@ -983,8 +1318,8 @@ def main():
     Returns: None
     '''
     root = tk.Tk()
-    root.geometry('1400x1100')
-    root.minsize(1100, 800)
+    root.geometry('1200x1200')
+    root.minsize(900, 900)
     app = ExperimentGUI(root)
     root.mainloop()
 
