@@ -1,0 +1,65 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT DATA SUMMARY
+--------------------------------------------------------------------------------
+Project Name:           demo_for_halleh
+Timestamp:              20260701_114506
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Experiments:  3
+
+EXPERIMENT DETAILS
+--------------------------------------------------------------------------------
+
+Experiment 1
+  Parameters:
+    Calibration Curve:    demo_for_halleh
+    Valve Position:       4
+    Desired Flow:         100.00 킠/min
+    Dispense Volume:      50.00 킠
+    Target Pressure:      15.071 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        30.00 s
+  Results:
+    Steady-State Flow:    130.39 킠/min
+    Deviation:            30.39% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           demo_for_halleh_Res4_Run1_20260701_114506.csv
+
+Experiment 2
+  Parameters:
+    Calibration Curve:    demo_for_halleh
+    Valve Position:       6
+    Desired Flow:         10.00 킠/min
+    Dispense Volume:      10.00 킠
+    Target Pressure:      1.133 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        60.00 s
+  Results:
+    Steady-State Flow:    18.08 킠/min
+    Deviation:            80.78% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           demo_for_halleh_Res6_Run2_20260701_114506.csv
+
+Experiment 3
+  Parameters:
+    Calibration Curve:    demo_for_halleh
+    Valve Position:       8
+    Desired Flow:         25.00 킠/min
+    Dispense Volume:      10.00 킠
+    Target Pressure:      3.456 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        24.00 s
+  Results:
+    Steady-State Flow:    34.49 킠/min
+    Deviation:            37.94% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           demo_for_halleh_Res8_Run3_20260701_114506.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+Average Steady-State Flow:  60.99 킠/min
+Min Steady-State Flow:      18.08 킠/min
+Max Steady-State Flow:      130.39 킠/min
+Experiments Exceeding Desired Flow Threshold: 3/3
+
+================================================================================

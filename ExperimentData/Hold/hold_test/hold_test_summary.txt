@@ -1,0 +1,34 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT DATA SUMMARY
+--------------------------------------------------------------------------------
+Project Name:           hold_test
+Timestamp:              20260707_122038
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Stages:  1
+
+STAGE DETAILS
+--------------------------------------------------------------------------------
+
+Stage 1
+  Parameters:
+    Calibration Curve:    hold_test
+    Valve Position:       2
+    Desired Flow:         0.00 µL/min
+    Dispense Volume:      0.00 µL
+    Target Pressure:      0.000 kPa
+    Pressure Tolerance:   0.000 kPa
+    Dispense Time:        0.00 s
+  Results:
+    Hold Time:            23.00 s
+    Steady-State Flow:    N/A
+    Deviation:            N/A
+    Output CSV:           hold_test_Res2_Run1_20260707_122038.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+
+================================================================================
