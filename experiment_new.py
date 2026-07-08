@@ -223,12 +223,13 @@ def extract_flow(csv_file):
     return time_col, flow_col, df.dropna(subset=[time_col, flow_col])
 
 
-def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, position=None):
+def compute_steady_stats_from_dispense(df, time_col, flow_col, dispense_time_s, position=None):
     '''
-    Compute the steady-state mean flow from the dispense portion of the run data.
+    Compute steady-state flow statistics from the dispense portion of the run data.
 
-    Finds the dispense start time from the valve 2 state column, then averages
-    flow over the middle half of the expected dispense window to avoid transients.
+    Finds the dispense start time from the valve 2 state column, then computes the
+    mean and standard deviation over the middle half of the expected dispense window
+    to avoid transients.
 
     Parameters:
     - df:               DataFrame containing the run data
@@ -238,10 +239,10 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, p
     - position:         valve position used to detect when dispensing started
 
     Returns:
-    The steady-state mean flow as a float, or None if it cannot be computed
+    A tuple of (mean_flow, std_flow), or (None, None) if it cannot be computed
     '''
     if df is None or len(df) == 0:
-        return None
+        return None, None
 
     # Locate the valve state column and find when dispensing started
     t_start   = None
@@ -259,7 +260,7 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, p
                 pass
 
     if t_start is None:
-        return None
+        return None, None
 
     # Average over the middle half of the dispense window
     mid_start = t_start + dispense_time_s / 4.0 #1/4 of the way through the dispense time
@@ -269,9 +270,17 @@ def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, p
     if sample.empty:
         sample = df[(df[time_col] >= t_start) & (df[time_col] <= t_start + dispense_time_s)]
     if sample.empty:
-        return None
+        return None, None
 
-    return float(np.mean(sample[flow_col]))
+    mean_flow = float(np.mean(sample[flow_col]))
+    std_flow = float(np.std(sample[flow_col], ddof=0))
+    return mean_flow, std_flow
+
+
+def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, position=None):
+    '''Backward-compatible wrapper returning the steady-state mean flow only.'''
+    mean_flow, _ = compute_steady_stats_from_dispense(df, time_col, flow_col, dispense_time_s, position)
+    return mean_flow
 
 # Plotting 
 
@@ -572,9 +581,12 @@ class ExperimentGUI:
                 fields[key] = entry
                 fields[f'{key}_lbl'] = label_widget
 
+            threshold_lbl = ttk.Label(exp_frame, text='Threshold (%):', background='white')
             threshold_entry = tk.Entry(exp_frame, font=('Segoe UI', 11))
             threshold_entry.insert(0, '10')
-            threshold_entry.grid_remove()
+            threshold_lbl.grid(row=6, column=0, sticky='w', padx=5, pady=3)
+            threshold_entry.grid(row=6, column=1, sticky='ew', padx=5, pady=3)
+            fields['threshold_lbl'] = threshold_lbl
             fields['threshold'] = threshold_entry
 
             hold_time_lbl = ttk.Label(exp_frame, text='Hold Time (s):', background='white')
@@ -673,6 +685,15 @@ class ExperimentGUI:
                 f = self.reservoirs[index]
                 if 'live_state_var' in f and f['live_state_var'] is not None:
                     f['live_state_var'].set(label)
+        except Exception:
+            pass
+
+    def reset_stage_statuses(self, label='Waiting for start'):
+        """Reset all stage labels to a neutral pre-run message."""
+        try:
+            for fields in self.reservoirs:
+                if 'live_state_var' in fields and fields['live_state_var'] is not None:
+                    fields['live_state_var'].set(label)
         except Exception:
             pass
 
@@ -889,6 +910,7 @@ class ExperimentGUI:
 
         use_thermal = self.thermal_enabled_var.get()
 
+        self.reset_stage_statuses('Waiting for start')
         self.write_live_state(done=False)
         self.start_live_plotter()
 
@@ -1157,20 +1179,21 @@ class ExperimentGUI:
                 continue
             try:
                 tcol, fcol, dfi = extract_flow(p['out_csv'])
-                avg = compute_steady_mean_from_dispense(dfi, tcol, fcol, p['disp_time'], p['pos'])
+                avg, std = compute_steady_stats_from_dispense(dfi, tcol, fcol, p['disp_time'], p['pos'])
             except Exception:
                 avg = None
+                std = None
 
             dev = None
             if avg is None:
                 self.result_vars[idx].set(f'Stage {idx+1} Avg: N/A')
             else:
                 dev = abs(avg - p['desired_flow']) / p['desired_flow'] * 100.0
-                self.result_vars[idx].set(f'Stage {idx+1} Avg: {avg:.2f} uL/min ({dev:.1f}%)')
+                self.result_vars[idx].set(f'Stage {idx+1} Avg: {avg:.2f} uL/min (std: {std:.2f}; dev: {dev:.1f}%)')
                 if dev > p['threshold_pct']:
                     exceeded.append((idx+1, avg, dev))
             
-            results.append({'avg_flow': avg, 'dev_pct': dev, 'desired_flow': p['desired_flow'], 'hold_time': None})
+            results.append({'avg_flow': avg, 'dev_pct': dev, 'desired_flow': p['desired_flow'], 'hold_time': None, 'std_flow': std})
 
         if exceeded:
             msgs = [f'Stage {r} avg {a:.1f} uL/min deviates {d:.1f}%' for r, a, d in exceeded]
@@ -1263,12 +1286,15 @@ class ExperimentGUI:
                     if p['hold_mode']:
                         f.write(f'    Hold Time:            {p["hold_time"]:.2f} s\n')
                         f.write(f'    Steady-State Flow:    N/A\n')
+                        f.write(f'    Steady-State Std Dev: N/A\n')
                         f.write(f'    Deviation:            N/A\n')
                     elif r['avg_flow'] is None:
                         f.write(f'    Steady-State Flow:    N/A\n')
+                        f.write(f'    Steady-State Std Dev: N/A\n')
                         f.write(f'    Deviation:            N/A\n')
                     else:
                         f.write(f'    Steady-State Flow:    {r["avg_flow"]:.2f} µL/min\n')
+                        f.write(f'    Steady-State Std Dev: {r["std_flow"]:.2f} µL/min\n')
                         dev_status = ''
                         if r['dev_pct'] > threshold_pct:
                             dev_status = 'EXCEEDS DESIRED THRESHOLD'
@@ -1283,12 +1309,18 @@ class ExperimentGUI:
                 f.write('-' * 80 + '\n')
                 
                 valid_flows = [r['avg_flow'] for r in results if r['avg_flow'] is not None]
+                valid_stds = [r['std_flow'] for r in results if r['std_flow'] is not None]
                 valid_devs = [r['dev_pct'] for r in results if r['dev_pct'] is not None]
                 
                 if valid_flows:
                     f.write(f'Average Steady-State Flow:  {np.mean(valid_flows):.2f} µL/min\n')
                     f.write(f'Min Steady-State Flow:      {np.min(valid_flows):.2f} µL/min\n')
                     f.write(f'Max Steady-State Flow:      {np.max(valid_flows):.2f} µL/min\n')
+
+                if valid_stds:
+                    f.write(f'Average Steady-State Std Dev: {np.mean(valid_stds):.2f} µL/min\n')
+                    f.write(f'Min Steady-State Std Dev:     {np.min(valid_stds):.2f} µL/min\n')
+                    f.write(f'Max Steady-State Std Dev:     {np.max(valid_stds):.2f} µL/min\n')
                 
                 if valid_devs:
                     exceeded_count = sum(1 for d in valid_devs if d > threshold_pct)
