@@ -7,7 +7,7 @@ run uProcess scripts for each reservoir, collect output CSV files, compute stead
 values, and generate individual and combined plots. Optional thermal control parameters
 can be enabled per-stage. If enabled, the script will wait for temperature stabilization before starting the dispense and 
 plots of temperature vs time will be generated alongside the flow and pressure plots. Live plots of flow and temperature
-are displayed after the stage run has started. 
+are displayed after the stage has started. 
 
 Author: Kylen Patel
 Last modified: 7/2/26
@@ -416,14 +416,14 @@ class ExperimentGUI:
         root.grid_rowconfigure(0, weight=1)
         root.grid_columnconfigure(0, weight=1)
 
-        # Global controls (Project name, Number of experiments, Thermal control)
+        # Global controls (Project name, Number of stages, Thermal control)
 
         ttk.Label(main, text='Project name:').grid(row=0, column=0, sticky='w')
         self.output_label = tk.Entry(main)
         self.output_label.insert(0, '')
         self.output_label.grid(row=0, column=1, sticky='ew')
 
-        ttk.Label(main, text='Number of experiments:').grid(row=1, column=0, sticky='w')
+        ttk.Label(main, text='Number of stages:').grid(row=1, column=0, sticky='w')
         self.num_experiments_var = tk.IntVar(value=3)
         num_cb = ttk.Combobox(main, values=list(range(1, 13)),
                               textvariable=self.num_experiments_var, state='readonly', width=5,
@@ -669,6 +669,14 @@ class ExperimentGUI:
             else:
                 fields['pressure_widget'].grid()
                 fields['time_widget'].grid()
+
+        if 'threshold_lbl' in fields:
+            if is_hold:
+                fields['threshold_lbl'].grid_remove()
+                fields['threshold'].grid_remove()
+            else:
+                fields['threshold_lbl'].grid()
+                fields['threshold'].grid()
 
         if 'hold_time_lbl' in fields:
             if is_hold and not use_thermal:
@@ -937,13 +945,16 @@ class ExperimentGUI:
                     messagebox.showerror('Error', f'Invalid thermal parameters for stage {i+1}')
                     return
 
+            threshold_pct_stage = 0.0
             try:
                 pos_raw = str(r['pos'].get()).strip()
                 pos = int(pos_raw) if pos_raw.isdigit() else min(8, 2 + i)
-                threshold_pct_stage = float(r['threshold'].get())
+                if not hold_mode:
+                    threshold_pct_stage = float(r['threshold'].get())
             except Exception:
                 pos = min(8, 2 + i)
-                threshold_pct_stage = 10.0
+                if not hold_mode:
+                    threshold_pct_stage = 10.0
 
             if not (2 <= pos <= 8):
                 pos = max(2, min(8, pos))
@@ -1295,10 +1306,7 @@ class ExperimentGUI:
                     else:
                         f.write(f'    Steady-State Flow:    {r["avg_flow"]:.2f} µL/min\n')
                         f.write(f'    Steady-State Std Dev: {r["std_flow"]:.2f} µL/min\n')
-                        dev_status = ''
-                        if r['dev_pct'] > threshold_pct:
-                            dev_status = 'EXCEEDS DESIRED THRESHOLD'
-                        f.write(f'    Deviation:            {r["dev_pct"]:.2f}% from desired{dev_status}\n')
+                        f.write(f'    Deviation:            {r["dev_pct"]:.2f}% from desired flow rate\n')
                     
                     csv_path = p.get('out_csv', 'N/A')
                     f.write(f'    Output CSV:           {os.path.basename(csv_path)}\n')
