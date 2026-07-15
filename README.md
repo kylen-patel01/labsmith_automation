@@ -23,7 +23,7 @@ Three scripts work together:
     from each stage's state CSV
   - Per-stage deviation-threshold checks, with a warning if steady-state flow
     deviates from the desired value by more than the configured percentage
-  - A "save output" toggle — turn it off to run in a temporary, auto-deleted
+  - A "save output" toggle - turn it off to run in a temporary, auto-deleted
     location for dry runs/demos instead of writing to `ExperimentData/`
   - A `_summary.txt` file per project with all run parameters and results
 - **live_plotter_multi.py** - launched automatically by experiment.py.
