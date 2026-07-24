@@ -25,6 +25,7 @@ The core backend logic remains the same:
 '''
 
 import os
+import sys
 import time
 import json
 import threading
@@ -33,14 +34,15 @@ from queue import Queue, Empty
 
 import numpy as np
 import pandas as pd
-import uProcess
 from sklearn.linear_model import LinearRegression
 from matplotlib import pyplot as plt
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+from calibration_review_utils import format_trial_values_for_prompt, remove_trials_by_numbers
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -53,6 +55,25 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 UPROCESS_PATH = Path(CONFIG["uprocess_path"])
 if not UPROCESS_PATH.exists():
     raise FileNotFoundError(f"uProcess path not found at {UPROCESS_PATH}")
+
+UPROCESS_LIB_DIR = BASE_DIR / "uProcess v2.072D BETA"
+for candidate_dir in [UPROCESS_PATH, UPROCESS_LIB_DIR]:
+    candidate_dir = str(candidate_dir)
+    if candidate_dir not in sys.path:
+        sys.path.insert(0, candidate_dir)
+
+try:
+    import uProcess
+except ImportError as exc:
+    raise ImportError(
+        "Could not import the LabSmith uProcess wrapper. "
+        "Expected the file 'uProcess v2.072D BETA/uProcess.py' next to this script."
+    ) from exc
+
+if not hasattr(uProcess, "OpenCommandPipe"):
+    raise ImportError(
+        "The imported module does not expose the expected uProcess command-pipe functions."
+    )
 
 BASE_USQ = BASE_DIR / "calibration.usq"
 if not BASE_USQ.exists():
@@ -91,8 +112,8 @@ def build_script(target_pressure: float, trial_csv: str, p_tol: float, dispense_
     return header + base
 
 
-def extract_flow(csv_file: str) -> float:
-    '''Read a uProcess CSV and estimate steady-state flow from 5-25 s.'''
+def extract_flow(csv_file: str, dispense_time: float) -> float:
+    '''Read a uProcess CSV and estimate steady-state flow from the middle half of the dispense window.'''
     df = pd.read_csv(csv_file, sep=";", skiprows=[0])
     df.columns = df.columns.str.strip()
 
@@ -103,7 +124,16 @@ def extract_flow(csv_file: str) -> float:
     df[flow_col] = pd.to_numeric(df[flow_col], errors="coerce")
     df = df.dropna(subset=[time_col, flow_col])
 
-    sampling = df[(df[time_col] >= 5) & (df[time_col] <= 25)]
+    if dispense_time <= 0:
+        raise ValueError("Dispense time must be positive.")
+
+    half_window = dispense_time / 2.0
+    start_time = dispense_time / 4.0
+    end_time = start_time + half_window
+
+    sampling = df[(df[time_col] >= start_time) & (df[time_col] <= end_time)]
+    if sampling.empty:
+        return float("nan")
     return float(np.mean(sampling[flow_col]))
 
 
@@ -119,6 +149,8 @@ class CalibrationGUI:
         self.worker_thread = None
         self.running = False
         self.current_data_dir = None
+        self.prompt_event = threading.Event()
+        self.prompt_result = None
 
         self._build_layout()
         self._poll_queue()
@@ -153,7 +185,7 @@ class CalibrationGUI:
         )
 
         # Default values are inputted here 
-        self._add_input_field(left, 1, "Application name:", "application_entry")
+        self._add_input_field(left, 1, "Solution/calibration name:", "application_entry")
         self._add_input_field(left, 2, "Lower pressure (kPa):", "lower_pressure_entry", "2")
         self._add_input_field(left, 3, "Upper pressure (kPa):", "upper_pressure_entry", "20")
         self._add_input_field(left, 4, "Pressure increment (kPa):", "pressure_increment_entry", "2")
@@ -186,6 +218,7 @@ class CalibrationGUI:
             "- The GUI shows trial results as they complete.\n"
             "- After each pressure group completes, refill the reservoir before continuing to the next pressure.\n"
             "- Click refill and continue when you finish refilling.\n"
+            "- Prime the liquid lines before injection to remove trapped air and ensure consistent flow.\n"
             "- The final calibration plot will appear on the right when done."
         )
         ttk.Label(left, text=help_text, wraplength=320, justify="left").grid(
@@ -307,6 +340,18 @@ class CalibrationGUI:
         self.status_var.set("Continuing calibration...")
         self.refill_event.set()
 
+    def _request_trial_review(self, pressure, trial_flows, data_dir):
+        '''Ask the user whether to keep all trials or remove one or more bad trials for a pressure target.'''
+        self.prompt_result = None
+        self.prompt_event.clear()
+        self.gui_queue.put(("prompt_review_pressure", {
+            "pressure": pressure,
+            "trial_flows": trial_flows.copy(),
+            "data_dir": str(data_dir),
+        }))
+        self.prompt_event.wait()
+        return self.prompt_result or {"action": "keep", "removed_trials": []}
+
     def run_calibration_worker(self, settings: dict):
         '''Background worker that performs the calibration loop.'''
         application_name = settings["application_name"]
@@ -347,7 +392,7 @@ class CalibrationGUI:
                     while uProcess.IsRunning(pipe):
                         time.sleep(0.5)
 
-                    avg_flow = extract_flow(output_csv)
+                    avg_flow = extract_flow(output_csv, dispense_time)
                     trial_flows.append(avg_flow)
 
                     self.gui_queue.put(("trial_result", {
@@ -355,7 +400,19 @@ class CalibrationGUI:
                         "trial_flows": trial_flows.copy()
                     }))
 
-                mean_flow = float(np.mean(trial_flows))
+                review_decision = self._request_trial_review(p, trial_flows, data_dir)
+                if review_decision.get("action") == "remove":
+                    trial_numbers = review_decision.get("trial_numbers", [])
+                    if trial_numbers:
+                        trial_flows, removed_entries = remove_trials_by_numbers(trial_flows, trial_numbers)
+                        review_log_path = os.path.join(data_dir, f"review_{p}kPa.csv")
+                        review_df = pd.DataFrame(removed_entries)
+                        if review_df.empty:
+                            review_df = pd.DataFrame(columns=["trial_number", "flow_value"])
+                        review_df.to_csv(review_log_path, index=False)
+                        self.gui_queue.put(("status", f"Removed trials {', '.join(map(str, trial_numbers))} at {p} kPa; recomputing mean/std."))
+
+                mean_flow = float(np.mean(trial_flows)) if trial_flows else 0.0
                 std_flow = float(np.std(trial_flows, ddof=1)) if len(trial_flows) > 1 else 0.0
                 calibration_results.append((p, mean_flow, std_flow))
 
@@ -500,6 +557,52 @@ class CalibrationGUI:
                         f"Completed {payload['pressure']} kPa "
                         f"(mean {payload['mean']:.2f} uL/min, std {payload['std']:.2f})"
                     )
+
+                elif msg_type == "prompt_review_pressure":
+                    pressure = payload["pressure"]
+                    trial_flows = payload["trial_flows"]
+                    data_dir = payload.get("data_dir")
+                    prompt_text = format_trial_values_for_prompt(pressure, trial_flows)
+                    keep_all = messagebox.askyesno(
+                        "Review trials",
+                        f"Keep all {len(trial_flows)} trial results for {pressure} kPa?\n\n{prompt_text}"
+                    )
+
+                    if keep_all:
+                        self.prompt_result = {"action": "keep", "removed_trials": []}
+                    elif len(trial_flows) <= 1:
+                        messagebox.showinfo(
+                            "No removal possible",
+                            "Only one trial remains, so there is nothing to remove."
+                        )
+                        self.prompt_result = {"action": "keep", "removed_trials": []}
+                    else:
+                        entry = simpledialog.askstring(
+                            "Remove one or more trials",
+                            f"Which trial numbers should be removed for {pressure} kPa?\n"
+                            f"Enter comma-separated numbers from 1 to {len(trial_flows)}\n\n{prompt_text}",
+                        )
+                        if entry is None or not entry.strip():
+                            self.prompt_result = {"action": "keep", "removed_trials": []}
+                        else:
+                            try:
+                                trial_numbers = [int(part.strip()) for part in entry.split(',') if part.strip()]
+                                if any(number < 1 or number > len(trial_flows) for number in trial_numbers):
+                                    raise ValueError("Out of range")
+                                self.prompt_result = {"action": "remove", "trial_numbers": trial_numbers}
+                            except Exception:
+                                messagebox.showwarning(
+                                    "Invalid input",
+                                    "Please enter valid trial numbers separated by commas."
+                                )
+                                self.prompt_result = {"action": "keep", "removed_trials": []}
+
+                    if data_dir:
+                        review_log_path = os.path.join(data_dir, f"review_{pressure}kPa.csv")
+                        if os.path.exists(review_log_path):
+                            os.remove(review_log_path)
+
+                    self.prompt_event.set()
 
                 elif msg_type == "wait_for_refill":
                     self.status_var.set(payload)
