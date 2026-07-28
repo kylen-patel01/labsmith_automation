@@ -1,0 +1,107 @@
+TargetPressure = 2 kPa
+TolerancePressure = 0.1 kPa 
+DispenseTime = 30 s
+OutputFile = "C:/Users/kylenp/Desktop/LabSmith/Automation/CalibrationData/Calib_2kPa_trial1.csv"
+
+*4VM02	=	4VM ; Valve manifold
+*4AM01	=	4AM ; Analog manifold 
+*P15585	=	uPS 800 kPa ; pressure sensor
+*SPS_1	=	SPS	80 ul ; Syringe pump
+
+
+
+Setup: 
+	; AV201 Fill Valve is connected to 4VM channel 1
+	; port A is open port (air)
+
+	; AV801 Selector Valve is connected to 4VM channel 2
+	; AV801 closed port (with plugged port)
+	closed = 1
+	; total number of reservoirs connected to AV801			
+	reservoir_count = 1		
+	; AV801 port of reservoir 1
+	position1 = 4			
+
+	; AV201 downstream Switching Valve is connected to 4VM channel 3
+
+Constants:
+	p_target = TargetPressure ;target pressure (default units = kPa)
+	p_tol = TolerancePressure ;pressure tolerance (default units = kPa) 
+	dispense_time = DispenseTime ;dispense time for each reservoir (default units = s)
+	output_file = OutputFile
+
+	fill_volume = 100		; syringe fill volume (default units: ul)
+	flow_rate = 500		; syringe flow rate
+
+	p_max = p_target+p_tol
+	count =1
+
+Initialize:
+	SPS_1: SetFlowRate(flow_rate ul/min)	
+
+	4VM02:	SetValves(0, 0, 1, 0)	; downstream AV201 valve is first set to port A, then to closed (2 = closed on AV201 valve).  	
+	WaitDone()			; setting directly to closed at the beginning of a script may result in the wrong position 
+	4VM02:	SetValves(0, 0, 2, 0)	; as the valve does not know its current position 
+	WaitDone()
+
+	4VM02: SetSelection(2, closed)	; switch the AV801 selector valve to the set closed position
+	WaitDone()
+
+Pressurize:
+	4VM02:	SetValves(1, 0, 0, 0)	; switch AV201 fill valve to port a (1 = port a) 
+	4VM02: WaitDone()
+
+	SPS_1:	MoveTo(fill_volume)	; pull syringe_1 to fill with air
+	SPS_1: WaitDone()
+	
+	4VM02:	SetValves(3, 0, 0, 0)	; open AV201 fill valve to reservoir port (3 = port B)
+	SPS_1:	MoveWith(DChB)				
+	P15585:	RegUpTo (p_max kPa, DChB)
+		Loop1:
+			if (SPS_1.IsDone == true) ; If the syringe ran out of air while pressurizing, go back and refill with air and continue to pressurize
+				goto Pressurize
+			if (P15585.IsDone == true) ; If the pressure sensor reached p_max, go to the Inject function
+				goto Inject
+			Wait(1 s)
+		Goto Loop1
+
+Inject:
+		if (count == 1) ; Ordering of which reservoir you want to dispense
+			pos = position1
+
+		4VM02:	SetValves(1, 0, 0, 0)	; set AV201 fill valve to port A 
+		4VM02: WaitDone()
+	
+		SPS_1:	MoveTo(fill_volume)	; pull syringe_1 to fill with air
+		SPS_1: WaitDone()
+
+		4VM02:	SetValves(3, 0, 0, 0)	; set AV201 fill valve to port B
+		4VM02: WaitDone()	
+
+	
+		
+		P15585:	HysteresisRegTo(p_target,p_tol,DChB) ; regulate pressure with p_tol tolerance. Basically if the pressure dips below p_target - p_tolerance, the syringe will push ever so slightly to gently increase the pressure. The regulation starts when the downstream AV201 valve switches to position B (the experiment).
+		SPS_1:	MoveWith(DChB)
+						
+
+		Wait(3 s);			; wait for pressure to stabilize
+		Log(output_file)			  
+		4VM02: SetSelection(2, pos)	; set the selector valve to the correct reservoir
+		4VM02: WaitDone()		
+		4VM02:	SetValves(0, 0, 1, 0)	; set AV201 valve to position B
+		Wait(dispense_time s)		; inject for set time
+
+		4VM02: SetSelection(2, closed)	; close the AV801 valve 
+		4VM02: WaitDone()
+		
+		count = count +1 ; repeat process for the other reservoirs
+		if (count > reservoir_count)  
+			goto End
+
+		Goto Inject
+
+End: 
+		4VM02: SetSelection(2, closed)	; close the AV801 valve
+		SPS_1: Stop()		; stop syringe 
+		4AM01: Stop() 
+Log(off)

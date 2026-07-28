@@ -1,0 +1,37 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT METADATA
+--------------------------------------------------------------------------------
+Project Name:           push_fluid_100ulmin_100ul
+Timestamp:              20260608_162147
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Experiments:  1
+
+EXPERIMENT DETAILS
+--------------------------------------------------------------------------------
+
+Experiment 1
+  Parameters:
+    Calibration Curve:    push_fluid_100ulmin_100ul
+    Valve Position:       4
+    Desired Flow:         100.00 킠/min
+    Dispense Volume:      100.00 킠
+    Target Pressure:      16.592 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        60.00 s
+  Results:
+    Steady-State Flow:    96.68 킠/min
+    Deviation:            3.32% from desired
+    Output CSV:           push_fluid_100ulmin_100ul_Res4_Run1_20260608_162147.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+Average Steady-State Flow:  96.68 킠/min
+Min Steady-State Flow:      96.68 킠/min
+Max Steady-State Flow:      96.68 킠/min
+Experiments Exceeding Desired Flow Threshold: 0/1
+
+================================================================================

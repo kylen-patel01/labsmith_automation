@@ -1,0 +1,37 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT METADATA
+--------------------------------------------------------------------------------
+Project Name:           empty_reservoir
+Timestamp:              20260608_161821
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Experiments:  1
+
+EXPERIMENT DETAILS
+--------------------------------------------------------------------------------
+
+Experiment 1
+  Parameters:
+    Calibration Curve:    empty_reservoir
+    Valve Position:       4
+    Desired Flow:         100.00 킠/min
+    Dispense Volume:      100.00 킠
+    Target Pressure:      16.592 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        60.00 s
+  Results:
+    Steady-State Flow:    4.46 킠/min
+    Deviation:            95.54% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           empty_reservoir_Res4_Run1_20260608_161821.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+Average Steady-State Flow:  4.46 킠/min
+Min Steady-State Flow:      4.46 킠/min
+Max Steady-State Flow:      4.46 킠/min
+Experiments Exceeding Desired Flow Threshold: 1/1
+
+================================================================================

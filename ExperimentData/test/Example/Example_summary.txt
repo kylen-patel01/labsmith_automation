@@ -1,0 +1,33 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT METADATA
+--------------------------------------------------------------------------------
+Project Name:           Example
+Timestamp:              20260608_112138
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Experiments:  1
+
+EXPERIMENT DETAILS
+--------------------------------------------------------------------------------
+
+Experiment 1
+  Parameters:
+    Calibration Curve:    Example
+    Valve Position:       4
+    Desired Flow:         100.00 µL/min
+    Dispense Volume:      100.00 µL
+    Target Pressure:      12.811 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        60.00 s
+  Results:
+    Steady-State Flow:    N/A
+    Deviation:            N/A
+    Output CSV:           Example_Res4_Run1_20260608_112138.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+
+================================================================================

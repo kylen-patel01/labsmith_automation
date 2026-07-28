@@ -1,0 +1,37 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT METADATA
+--------------------------------------------------------------------------------
+Project Name:           test_0529
+Timestamp:              20260529_121922
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Experiments:  1
+
+EXPERIMENT DETAILS
+--------------------------------------------------------------------------------
+
+Experiment 1
+  Parameters:
+    Calibration Curve:    test_0529
+    Valve Position:       4
+    Desired Flow:         100.00 킠/min
+    Dispense Volume:      75.00 킠
+    Target Pressure:      15.071 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        45.00 s
+  Results:
+    Steady-State Flow:    -0.20 킠/min
+    Deviation:            100.20% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           test_0529_di_water_Res4_Run1_20260529_121922.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+Average Steady-State Flow:  -0.20 킠/min
+Min Steady-State Flow:      -0.20 킠/min
+Max Steady-State Flow:      -0.20 킠/min
+Experiments Exceeding Desired Flow Threshold: 1/1
+
+================================================================================

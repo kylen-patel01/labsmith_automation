@@ -1,0 +1,51 @@
+================================================================================
+PROJECT SUMMARY
+================================================================================
+
+PROJECT METADATA
+--------------------------------------------------------------------------------
+Project Name:           exp1
+Timestamp:              20260529_133420
+Thermal Control:        Disabled
+Deviation Threshold:    10.0%
+Number of Experiments:  2
+
+EXPERIMENT DETAILS
+--------------------------------------------------------------------------------
+
+Experiment 1
+  Parameters:
+    Calibration Curve:    exp1
+    Valve Position:       8
+    Desired Flow:         50.00 킠/min
+    Dispense Volume:      50.00 킠
+    Target Pressure:      7.755 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        60.00 s
+  Results:
+    Steady-State Flow:    -0.21 킠/min
+    Deviation:            100.42% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           exp1_Res8_Run1_20260529_133420.csv
+
+Experiment 2
+  Parameters:
+    Calibration Curve:    exp1
+    Valve Position:       8
+    Desired Flow:         50.00 킠/min
+    Dispense Volume:      50.00 킠
+    Target Pressure:      7.755 kPa
+    Pressure Tolerance:   0.100 kPa
+    Dispense Time:        60.00 s
+  Results:
+    Steady-State Flow:    58.16 킠/min
+    Deviation:            16.32% from desiredEXCEEDS DESIRED THRESHOLD
+    Output CSV:           exp1_Res8_Run2_20260529_133420.csv
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+Average Steady-State Flow:  28.98 킠/min
+Min Steady-State Flow:      -0.21 킠/min
+Max Steady-State Flow:      58.16 킠/min
+Experiments Exceeding Desired Flow Threshold: 2/2
+
+================================================================================
