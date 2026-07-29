@@ -43,6 +43,11 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from calibration_review_utils import format_trial_values_for_prompt, remove_trials_by_numbers
+from calibration_resume_utils import (
+    collect_existing_pressure_results,
+    discover_incomplete_calibrations,
+    first_incomplete_pressure,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -151,9 +156,11 @@ class CalibrationGUI:
         self.current_data_dir = None
         self.prompt_event = threading.Event()
         self.prompt_result = None
+        self.resume_selection = None
 
         self._build_layout()
         self._poll_queue()
+        self.root.after(300, self._check_for_resume_candidates)
 
     def _add_input_field(self, parent, row, label_text, entry_attr, default=""):
         '''Helper to create a labeled entry field.'''
@@ -216,6 +223,10 @@ class CalibrationGUI:
             "- Pressure targets are generated from a lower bound, upper bound, and increment value.\n"
             "  Example: lower=2, upper=20, increment=2, P = [2,4,6,...,20]\n"
             "- The GUI shows trial results as they complete.\n"
+            "- On startup the app asks to resume any unfinished calibration folder, meaning one that has\n"
+            "  trial CSVs but no calibration_coeffs.txt and no calibration_plot.png.\n"
+            "- Resuming reuses the saved trials below the chosen start pressure and re-runs everything\n"
+            "  from it upward, then saves the coefficients and plot as usual.\n"
             "- After each pressure group completes, refill the reservoir before continuing to the next pressure.\n"
             "- Click refill and continue when you finish refilling.\n"
             "- Prime the liquid lines before injection to remove trapped air and ensure consistent flow.\n"
@@ -274,6 +285,169 @@ class CalibrationGUI:
         right.grid_rowconfigure(3, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
+    def _get_resume_dispense_time(self) -> float:
+        '''Best-effort parse of the current dispense time for resume scanning.'''
+        try:
+            return float(self.dispense_time_entry.get())
+        except ValueError:
+            return 30.0
+
+    def _get_trials_per_pressure(self) -> int:
+        '''Best-effort parse of the trials-per-pressure field for resume scanning.'''
+        try:
+            trials = int(self.trials_entry.get())
+            return trials if trials > 0 else 4
+        except ValueError:
+            return 4
+
+    def _get_planned_pressures(self):
+        '''Best-effort pressure list from the current bounds, or None if they are not usable yet.'''
+        try:
+            return generate_pressure_list(
+                float(self.lower_pressure_entry.get()),
+                float(self.upper_pressure_entry.get()),
+                float(self.pressure_increment_entry.get()),
+            )
+        except (ValueError, TypeError):
+            return None
+
+    def _describe_candidate(self, results, trials_per_pressure) -> str:
+        '''Summarize how many trials each pressure target already has.'''
+        lines = []
+        for result in results:
+            count = len(result["trial_flows"])
+            state = "complete" if count >= trials_per_pressure else "incomplete"
+            lines.append(
+                f"  {result['pressure']:g} kPa: {count}/{trials_per_pressure} trials ({state}), "
+                f"mean {result['mean']:.2f} uL/min"
+            )
+        return "\n".join(lines)
+
+    def _populate_existing_results(self, results):
+        '''Show previously completed pressure rows in the GUI table.'''
+        self.tree.delete(*self.tree.get_children())
+        for result in results:
+            self.update_pressure_complete_row(
+                pressure=result["pressure"],
+                trial_flows=result["trial_flows"],
+                mean=result["mean"],
+                std=result["std"],
+            )
+
+    def _check_for_resume_candidates(self):
+        '''Offer to resume an unfinished calibration folder if one is detected.
+
+        A folder counts as unfinished when it holds trial CSVs but no coefficients
+        file and no plot, which is what a calibration that stopped part way through
+        leaves behind. Nothing is asked when every folder is already finished.
+        '''
+        candidates = discover_incomplete_calibrations(CALIB_DATA_DIR, dispense_time=self._get_resume_dispense_time())
+        if not candidates:
+            return
+
+        trials_per_pressure = self._get_trials_per_pressure()
+
+        if len(candidates) == 1:
+            selected = candidates[0]
+            question = (
+                f"Found an unfinished calibration: {selected['name']}\n"
+                "(it has trial data but no coefficients file and no plot)\n\n"
+                f"{self._describe_candidate(selected['results'], trials_per_pressure)}\n\n"
+                "Continue this calibration?"
+            )
+        else:
+            selected = None
+            question = (
+                f"Found {len(candidates)} unfinished calibrations in {CALIB_DATA_DIR}:\n\n"
+                + "\n".join(f"  {candidate['name']}" for candidate in candidates)
+                + "\n\nContinue one of them?"
+            )
+
+        if not messagebox.askyesno("Resume calibration?", question):
+            return
+
+        if selected is None:
+            names = [candidate["name"] for candidate in candidates]
+            selection = simpledialog.askstring(
+                "Resume calibration",
+                "Enter the calibration folder name to resume:\n\n" + "\n".join(names),
+            )
+            if not selection:
+                return
+            selected = next(
+                (candidate for candidate in candidates if candidate["name"].lower() == selection.strip().lower()),
+                None,
+            )
+            if selected is None:
+                messagebox.showwarning("Resume cancelled", "No matching calibration folder was selected.")
+                return
+
+        # The saved CSVs only make sense against the dispense time they were recorded
+        # with, which may differ from the one used for the remaining pressures.
+        existing_dispense_time = simpledialog.askfloat(
+            "Existing dispense time",
+            f"What dispense time (s) was used for the trials already in {selected['name']}?\n\n"
+            "This only affects how the saved CSVs are re-read. You can still enter a\n"
+            "different dispense time in the main window for the pressures you re-run.",
+            initialvalue=self._get_resume_dispense_time(),
+            minvalue=0.001,
+        )
+        if existing_dispense_time is None:
+            self.status_var.set("Resume cancelled.")
+            return
+
+        results = collect_existing_pressure_results(Path(selected["path"]), dispense_time=existing_dispense_time)
+        if not results:
+            messagebox.showwarning(
+                "Resume cancelled",
+                f"No usable trial data could be read from {selected['name']} at a {existing_dispense_time} s dispense time.",
+            )
+            self.status_var.set("Resume cancelled.")
+            return
+
+        self.application_entry.delete(0, tk.END)
+        self.application_entry.insert(0, selected["name"])
+        self.resume_selection = {
+            "name": selected["name"],
+            "path": str(selected["path"]),
+            "results": results,
+            "existing_dispense_time": existing_dispense_time,
+        }
+        self._populate_existing_results(results)
+
+        suggested = first_incomplete_pressure(
+            results,
+            trials_per_pressure,
+            pressures=self._get_planned_pressures(),
+        )
+        prompt = (
+            f"{self._describe_candidate(results, trials_per_pressure)}\n\n"
+            "At which pressure should the calibration restart?\n"
+            "Everything below it is reused from the saved trials, and everything\n"
+            "from it upward is re-run and overwritten."
+        )
+        if suggested is not None:
+            prompt += f"\n\n{suggested:g} kPa is the first target without a full set of trials."
+
+        resume_from_pressure = simpledialog.askfloat(
+            "Start pressure",
+            prompt,
+            initialvalue=suggested if suggested is not None else None,
+        )
+        if resume_from_pressure is None:
+            self.resume_selection = None
+            self.tree.delete(*self.tree.get_children())
+            self.status_var.set("Resume cancelled.")
+            return
+
+        self.resume_selection["resume_from_pressure"] = resume_from_pressure
+        reused = [result["pressure"] for result in results if result["pressure"] < resume_from_pressure]
+        self.status_var.set(
+            f"Resuming {selected['name']} from {resume_from_pressure:g} kPa "
+            f"(reusing {', '.join(f'{p:g}' for p in reused) or 'no'} kPa). "
+            "Enter the remaining settings, then press Start Calibration."
+        )
+
     def collect_settings(self):
         '''Read and validate the current GUI settings.'''
         application_name = self.application_entry.get().strip()
@@ -293,12 +467,30 @@ class CalibrationGUI:
         if not all(v > 0 for v in [dispense_time, p_tol, trials]):
             raise ValueError("Dispense time, tolerance, and trials must all be positive.")
 
+        # Renaming the calibration means the loaded results no longer belong to it.
+        if self.resume_selection and self.resume_selection["name"].lower() != application_name.lower():
+            self.resume_selection = None
+            self.status_var.set("Calibration name changed, so the resumed results were dropped.")
+
+        resume_from_pressure = None
+        if self.resume_selection:
+            resume_from_pressure = self.resume_selection.get("resume_from_pressure")
+            if resume_from_pressure is not None and not any(
+                abs(p - resume_from_pressure) < 1e-9 for p in pressures
+            ):
+                raise ValueError(
+                    f"The resume pressure {resume_from_pressure:g} kPa is not in the generated pressure list "
+                    f"({', '.join(f'{p:g}' for p in pressures)}). Adjust the bounds or increment."
+                )
+
         return {
             "application_name": application_name,
             "pressures": pressures,
             "dispense_time": dispense_time,
             "p_tol": p_tol,
             "trials_per_pressure": trials,
+            "resume_from_pressure": resume_from_pressure,
+            "resume_selection": self.resume_selection,
         }
 
     def start_calibration(self):
@@ -319,6 +511,8 @@ class CalibrationGUI:
         self.refill_button.configure(state="disabled")
         self.status_var.set("Starting calibration...")
         self.tree.delete(*self.tree.get_children())
+        if self.resume_selection and self.resume_selection.get("results"):
+            self._populate_existing_results(self.resume_selection["results"])
         
         self.ax.clear()
         self.ax.set_title("Calibration in progress...")
@@ -359,6 +553,11 @@ class CalibrationGUI:
         dispense_time = settings["dispense_time"]
         p_tol = settings["p_tol"]
         trials_per_pressure = settings["trials_per_pressure"]
+        resume_from_pressure = settings.get("resume_from_pressure")
+        resume_selection = settings.get("resume_selection") or {}
+        existing_results = {
+            float(result["pressure"]): result for result in resume_selection.get("results", [])
+        }
 
         data_dir = CALIB_DATA_DIR / application_name
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -371,6 +570,36 @@ class CalibrationGUI:
             pipe = uProcess.OpenCommandPipe()
 
             for p in pressures:
+                if resume_from_pressure is not None and p < resume_from_pressure:
+                    # Reuse the saved trials rather than dropping the pressure, so the
+                    # fit, summary CSV, and plot cover the whole sweep.
+                    existing = existing_results.get(float(p))
+                    if existing is None:
+                        self.gui_queue.put((
+                            "status",
+                            f"No saved trials found for {p} kPa, so it is left out of the calibration fit."
+                        ))
+                        continue
+
+                    calibration_results.append((p, existing["mean"], existing["std"]))
+                    self.gui_queue.put(("pressure_complete", {
+                        "pressure": p,
+                        "trial_flows": list(existing["trial_flows"]),
+                        "mean": existing["mean"],
+                        "std": existing["std"],
+                    }))
+                    continue
+
+                if resume_from_pressure is not None and p >= resume_from_pressure:
+                    for existing_csv in sorted(data_dir.glob(f"{LOG_PREFIX}_{p}kPa_trial*.csv")):
+                        try:
+                            existing_csv.unlink()
+                        except FileNotFoundError:
+                            pass
+                    review_log_path = data_dir / f"review_{p}kPa.csv"
+                    if review_log_path.exists():
+                        review_log_path.unlink()
+
                 trial_flows = []
                 self.gui_queue.put(("status", f"Running pressure group: {p} kPa"))
 
