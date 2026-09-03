@@ -32,9 +32,6 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# uProcess hardware control wrapper
-import uProcess
-
 # Path Setup
 # BASE_DIR is the folder where this script lives.
 # All other paths are defined relative to it so the project remains portable.
@@ -42,6 +39,29 @@ import uProcess
 BASE_DIR  = os.path.abspath(os.path.dirname(__file__))
 CALIB_DIR = os.path.join(BASE_DIR, 'CalibrationData')
 BASE_USQ  = os.path.join(BASE_DIR, 'experiment.usq')
+
+CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+    CONFIG = json.load(f)
+
+UPROCESS_PATH = os.path.abspath(CONFIG.get('uprocess_path', ''))
+UPROCESS_LIB_DIR = os.path.join(BASE_DIR, 'uProcess v2.072D BETA')
+for candidate_dir in [UPROCESS_PATH, UPROCESS_LIB_DIR]:
+    if candidate_dir and candidate_dir not in sys.path:
+        sys.path.insert(0, candidate_dir)
+
+try:
+    import uProcess
+except ImportError as exc:
+    raise ImportError(
+        "Could not import the LabSmith uProcess wrapper. "
+        "Expected the file 'uProcess v2.072D BETA/uProcess.py' next to this script."
+    ) from exc
+
+if not hasattr(uProcess, 'OpenCommandPipe'):
+    raise ImportError(
+        "The imported module does not expose the expected uProcess command-pipe functions."
+    )
 
 # Calibration Loading 
 
@@ -189,6 +209,20 @@ def build_script(target_pressure, dispense_time_s, trial_csv, p_tol, position=No
         base = f.read()
 
     return (header + base).replace('\n', '\r\n').replace('\x00', '') 
+
+
+def calculate_clear_stage(dead_volume_ul, clear_flow):
+    """Return the duration needed to clear dead volume at a fixed flow rate."""
+    if clear_flow <= 0:
+        raise ValueError('Clear flow must be greater than zero.')
+    return (dead_volume_ul / clear_flow) * 60.0
+
+
+def calculate_target_pressure(desired_flow, slope, intercept):
+    """Back-calculate pressure for a desired flow using a calibration curve."""
+    if slope is None or slope == 0:
+        raise ValueError('The selected calibration has no usable slope.')
+    return (desired_flow - intercept) / slope
 
 # CSV Analysis 
 
@@ -413,13 +447,16 @@ class ExperimentGUI:
         main.grid_columnconfigure(0, weight=0)
         main.grid_columnconfigure(1, weight=1)
         main.grid_columnconfigure(2, weight=0)
+        main.grid_columnconfigure(3, weight=1)
+        main.grid_columnconfigure(4, weight=0)
+        main.grid_columnconfigure(5, weight=1)
         root.grid_rowconfigure(0, weight=1)
         root.grid_columnconfigure(0, weight=1)
 
-        # Global controls (Project name, Number of stages, Thermal control)
+        # Global controls (Project name and Number of stages)
 
         ttk.Label(main, text='Project name:').grid(row=0, column=0, sticky='w')
-        self.output_label = tk.Entry(main)
+        self.output_label = tk.Entry(main, width = 30)
         self.output_label.insert(0, '')
         self.output_label.grid(row=0, column=1, sticky='ew')
 
@@ -432,11 +469,11 @@ class ExperimentGUI:
         num_cb.bind('<<ComboboxSelected>>', self.on_experiment_count_changed)
 
         # Thermal control toggle
-        ttk.Separator(main, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=5)
+        ttk.Separator(main, orient='horizontal').grid(row=2, column=0, columnspan=6, sticky='ew', pady=5)
         self.thermal_enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(main, text='Enable Temperature Control',
                         variable=self.thermal_enabled_var,
-                        command=self.on_thermal_control_toggled).grid(row=2, column=0, columnspan=3, sticky='w', pady=2)
+                        command=self.on_thermal_control_toggled).grid(row=2, column=0, columnspan=6, sticky='w', pady=2)
         
         # Include timestamp in individual files checkbox
         ttk.Checkbutton(main, text='Include Timestamp in Individual Files',
@@ -444,12 +481,12 @@ class ExperimentGUI:
 
         # Save output data checkbox
         ttk.Checkbutton(main, text='Save all output data (CSV/plots/summary)',
-                        variable=self.save_output_var).grid(row=3, column=2, sticky='w', pady=2)
+                variable=self.save_output_var).grid(row=3, column=2, columnspan=4, sticky='w', pady=2)
 
         # Scrollable reservoir input area
 
         container       = ttk.Frame(main)
-        container.grid(row=4, column=0, columnspan=3, sticky='nsew', pady=(10, 0))
+        container.grid(row=4, column=0, columnspan=6, sticky='nsew', pady=(10, 0))
         self.res_canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
         res_scrollbar   = ttk.Scrollbar(container, orient='vertical', command=self.res_canvas.yview)
         self.res_inner  = ttk.Frame(self.res_canvas)
@@ -464,19 +501,22 @@ class ExperimentGUI:
 
         # Results, status, notes, and buttons
         self.result_frame = ttk.Frame(main)
-        self.result_frame.grid(row=5, column=0, columnspan=3, sticky='w')
+        self.result_frame.grid(row=5, column=0, columnspan=6, sticky='w')
 
         self.status_var = tk.StringVar(value='Ready')
-        ttk.Label(main, textvariable=self.status_var).grid(row=6, column=0, columnspan=3, sticky='w')
+        ttk.Label(main, textvariable=self.status_var).grid(row=6, column=0, columnspan=6, sticky='w')
 
         notes = ttk.Frame(main)
-        notes.grid(row=10, column=0, columnspan=3, sticky='w')
+        notes.grid(row=10, column=0, columnspan=6, sticky='w')
         ttk.Label(notes, text='Note: Temperature has to stabilize before pressurization begins. Stabilization time is determined by the temp_dwell parameter in the script and can be set per run in this GUI.',
                   font=('Segoe UI', 12, 'bold')).grid(row=0, column=0, sticky='w', pady=1)
-        ttk.Label(notes, text='Note: Interconnect volume must be added manually to dispense volume. '
-                              'If dispense volume is large, consider splitting into multiple stage runs',
+        ttk.Label(notes, text='Note: Each stage is preceded by a clear stage that pushes the configured dead volume '
+                      'at the configured clear pressure; the stage calibration determines its estimated flow.',
                   font=('Segoe UI', 12, 'bold')).grid(row=1, column=0, sticky='w', pady=1)
-
+        ttk.Label(notes, text='Note: Prime the liquid lines before injection to remove trapped air and ensure consistent flow.',
+                  font=('Segoe UI', 12, 'bold')).grid(row=2, column=0, sticky='w', pady=1)
+        ttk.Label(notes, text='Note: If one reservoir fails repeatedly, check the AV801 valve port for clogging, dried reagent, or a valve-motor issue; the programmed position may not match the true mechanical position. Flush with DI water after use.',
+                  font=('Segoe UI', 12, 'bold')).grid(row=3, column=0, sticky='w', pady=1)
         # Button frame for experiment control
         btn_frame = ttk.Frame(main)
         btn_frame.grid(row=8, column=0, columnspan=3, sticky='ew', pady=6)
@@ -513,6 +553,22 @@ class ExperimentGUI:
 
         Returns: None
         '''
+        editable_keys = [
+            'calib_curve', 'pos', 'flow', 'vol', 'p_tol', 'threshold', 'hold_time',
+            'clear_volume', 'clear_flow', 'temp_lower', 'temp_upper', 'temp_dwell', 'temp_ramp',
+        ]
+        previous_values = []
+        for old_fields in getattr(self, 'reservoirs', []):
+            values = {}
+            for key in editable_keys:
+                widget = old_fields.get(key)
+                if widget is not None and hasattr(widget, 'get'):
+                    try:
+                        values[key] = widget.get()
+                    except Exception:
+                        pass
+            previous_values.append(values)
+
         for w in self.res_inner.winfo_children():
             w.destroy()
         for w in self.result_frame.winfo_children():
@@ -523,16 +579,50 @@ class ExperimentGUI:
         n = self.num_experiments_var.get()
         use_thermal  = self.thermal_enabled_var.get()
         rows_per_exp = 13 if use_thermal else 9
-        spacing_rows = 2
+        spacing_rows = 4
         spacing_cols = 1
+        block_height = rows_per_exp + spacing_rows + 4
 
         for i in range(n):
             col = (i % 3) * (2 + spacing_cols)
-            row = (i // 3) * (rows_per_exp + spacing_rows)
+            row = (i // 3) * block_height
+            stage_row = row + 4
+            gap_start = stage_row + rows_per_exp
+            for gap_row in range(gap_start, gap_start + spacing_rows):
+                self.res_inner.grid_rowconfigure(gap_row, minsize=18)
+
+            clear_frame = tk.Frame(self.res_inner, relief='solid', borderwidth=2, bg='white')
+            clear_frame.grid(row=row, column=col, columnspan=2, sticky='w', padx=3, pady=0)
+            for clear_col in range(8):
+                clear_frame.grid_columnconfigure(clear_col, weight=1)
+
+            tk.Label(clear_frame, text=f'Clear stage {i+1}',
+                     font=('Segoe UI', 13, 'bold'), fg='black', bg='white').grid(
+                         row=0, column=0, columnspan=8, sticky='w', pady=0, padx=5)
+
+            clear_specs = [
+                ('clear_volume', 'Dead Volume (uL):', ''),
+                ('clear_flow', 'Flow Rate (uL/min):', ''),
+            ]
+            clear_fields = {}
+            for clear_col, (key, label, default) in enumerate(clear_specs):
+                grid_col = clear_col * 4
+                tk.Label(clear_frame, text=label, font=('Segoe UI', 11),
+                         fg='black', bg='white').grid(
+                    row=1, column=grid_col, columnspan=3, sticky='w', padx=2)
+                entry = tk.Entry(clear_frame, width=9, font=('Segoe UI', 11))
+                entry.insert(0, default)
+                entry.grid(row=2, column=grid_col, columnspan=3, sticky='ew', padx=2, pady=(0, 2))
+                clear_fields[key] = entry
+
+            clear_status_var = tk.StringVar(value='Enter clear settings and compute')
+            tk.Label(clear_frame, textvariable=clear_status_var,
+                     font=('Segoe UI', 11, 'italic'), fg='black', bg='white').grid(
+                         row=3, column=0, columnspan=8, sticky='w', padx=2)
 
             # Bordered frame for each experiment panel
             exp_frame = tk.Frame(self.res_inner, relief='solid', borderwidth=2, bg='white')
-            exp_frame.grid(row=row, column=col, columnspan=2, sticky='nsew', padx=3, pady=3)
+            exp_frame.grid(row=stage_row, column=col, columnspan=2, sticky='nsew', padx=3, pady=3)
             exp_frame.grid_columnconfigure(0, weight=1)
             exp_frame.grid_columnconfigure(1, weight=1)
 
@@ -566,6 +656,8 @@ class ExperimentGUI:
             fields['pos_lbl'] = pos_label
             fields['live_state_var'] = live_state_var
             fields['live_state_widget'] = live_state_lbl
+            fields['clear_status_var'] = clear_status_var
+            fields.update(clear_fields)
 
             specs   = [
                 ('flow',  'Flow (uL/min):',            '100'),
@@ -635,6 +727,20 @@ class ExperimentGUI:
                 for key, _, _ in thermal_specs:
                     fields[key] = None
 
+            if i < len(previous_values):
+                for key, value in previous_values[i].items():
+                    widget = fields.get(key)
+                    if widget is None:
+                        continue
+                    try:
+                        if hasattr(widget, 'set'):
+                            widget.set(value)
+                        else:
+                            widget.delete(0, tk.END)
+                            widget.insert(0, value)
+                    except Exception:
+                        pass
+
             calib_cb.bind('<<ComboboxSelected>>', lambda event, f=fields: self._update_hold_field_visibility(f))
             self._update_hold_field_visibility(fields)
 
@@ -696,12 +802,24 @@ class ExperimentGUI:
         except Exception:
             pass
 
+    def set_clear_stage_status(self, index, label):
+        """Update the lightweight clear-stage status for a stage index."""
+        try:
+            if 0 <= index < len(self.reservoirs):
+                status_var = self.reservoirs[index].get('clear_status_var')
+                if status_var is not None:
+                    status_var.set(label)
+        except Exception:
+            pass
+
     def reset_stage_statuses(self, label='Waiting for start'):
         """Reset all stage labels to a neutral pre-run message."""
         try:
             for fields in self.reservoirs:
                 if 'live_state_var' in fields and fields['live_state_var'] is not None:
                     fields['live_state_var'].set(label)
+                if 'clear_status_var' in fields and fields['clear_status_var'] is not None:
+                    fields['clear_status_var'].set('Clear stage: Waiting for start')
         except Exception:
             pass
 
@@ -741,6 +859,27 @@ class ExperimentGUI:
             if not calib_name:
                 messagebox.showerror('Error', f'Stage {i+1}: Select a calibration curve/solution')
                 return
+
+            try:
+                clear_volume = float(r['clear_volume'].get())
+                clear_flow = float(r['clear_flow'].get())
+                clear_time = calculate_clear_stage(clear_volume, clear_flow)
+                if clear_volume < 0:
+                    raise ValueError('Clear volume must be non-negative.')
+                if calib_name == 'Hold' and clear_volume > 0:
+                    raise ValueError('Hold stages need a calibration curve to calculate clear pressure.')
+                if calib_name == 'Hold':
+                    clear_pressure = 0.0
+                else:
+                    info = self.curves[calib_name]
+                    clear_pressure = calculate_target_pressure(
+                        clear_flow, info.get('slope'), info.get('intercept'))
+            except Exception as exc:
+                messagebox.showerror('Error', f'Clear stage {i+1}: Invalid settings: {exc}')
+                return
+            r['clear_status_var'].set(
+                f'Clears dead volume in {clear_time:.2f} s at {clear_pressure:.3f} kPa '
+                f'({clear_flow:.2f} uL/min)')
 
             if calib_name == 'Hold':
                 hold_time_value = 0.0
@@ -924,6 +1063,7 @@ class ExperimentGUI:
 
         # Validate all inputs up front before opening the hardware pipe
         run_params      = []
+        execution_params = []
         individual_csvs = []
         calib_names     = []  # Track calibration names for output organization
 
@@ -983,6 +1123,23 @@ class ExperimentGUI:
                 intercept = info.get('intercept')
                 pressure  = (desired_flow - intercept) / slope if slope != 0 else 0.0
                 disp_time = (vol / desired_flow) * 60.0         if desired_flow > 0 else 0.0
+
+            try:
+                clear_volume = float(r['clear_volume'].get())
+                clear_flow = float(r['clear_flow'].get())
+                clear_time = calculate_clear_stage(clear_volume, clear_flow)
+                if clear_volume < 0:
+                    raise ValueError('Clear volume must be non-negative.')
+                if hold_mode and clear_volume > 0:
+                    raise ValueError('Hold stages need a calibration curve to calculate clear pressure.')
+                if hold_mode:
+                    clear_pressure = 0.0
+                else:
+                    clear_pressure = calculate_target_pressure(
+                        clear_flow, slope, intercept)
+            except Exception as exc:
+                messagebox.showerror('Error', f'Clear stage {i+1}: Invalid settings: {exc}')
+                return
             
             # Create output directory using the project name as the top-level folder.
             # In demo mode, send outputs to a temporary folder so no persistent files are left behind.
@@ -1019,7 +1176,7 @@ class ExperimentGUI:
                 r['pressure_lbl'].set(f'Pressure: {pressure:.3f} kPa' if slope != 0 else 'Pressure: N/A')
                 r['time_lbl'].set(f'Time (s): {disp_time:.2f}')
 
-            run_params.append({
+            stage_param = {
                 'desired_flow': desired_flow, 'disp_time': disp_time, 'pos': pos,
                 'p_tol': p_tol, 'pressure': pressure, 'out_csv': out_csv,
                 'temp_lower': temp_lower, 'temp_upper': temp_upper,
@@ -1028,7 +1185,34 @@ class ExperimentGUI:
                 'threshold_pct': threshold_pct_stage,
                 'out_dir': out_dir,
                 'state_file': state_file,
-            })
+                'stage_index': i, 'is_clear': False,
+            }
+            run_params.append(stage_param)
+
+            if clear_volume > 0:
+                clear_base = f'{exp_name}_ClearBeforeStage{i+1}_Res{pos}'
+                if include_ts:
+                    clear_csv = os.path.join(out_dir, f'{clear_base}_{timestamp}.csv').replace('\\', '/')
+                else:
+                    clear_csv = os.path.join(out_dir, f'{clear_base}.csv').replace('\\', '/')
+                clear_state = os.path.join(out_dir, f'{clear_base}_state.csv').replace('\\', '/')
+                try:
+                    with open(clear_state, 'w') as sf:
+                        sf.write('time_s;state\n')
+                except Exception:
+                    pass
+
+                clear_param = {
+                    'desired_flow': clear_flow, 'disp_time': clear_time, 'pos': pos,
+                    'p_tol': p_tol, 'pressure': clear_pressure, 'out_csv': clear_csv,
+                    'temp_lower': None, 'temp_upper': None,
+                    'temp_dwell': None, 'temp_ramp': None,
+                    'hold_mode': False, 'hold_time': 0.0, 'threshold_pct': 0.0,
+                    'out_dir': out_dir, 'state_file': clear_state,
+                    'stage_index': i, 'is_clear': True,
+                }
+                execution_params.append(clear_param)
+            execution_params.append(stage_param)
             calib_names.append(calib_name)
 
         # Open a single hardware pipe shared across all runs
@@ -1047,7 +1231,9 @@ class ExperimentGUI:
         self.resume_btn.configure(state='disabled')
         self.stop_btn.configure(state='normal')
 
-        for i, p in enumerate(run_params):
+        for i, p in enumerate(execution_params):
+            stage_index = p.get('stage_index', i)
+            status_index = stage_index
             # Check if user requested stop
             if self.stop_requested:
                 self.status_var.set('Experiment stopped by user')
@@ -1058,13 +1244,16 @@ class ExperimentGUI:
                 # Set all remaining stages to Queued if they are still at the default
                 for q in range(len(self.reservoirs)):
                     try:
-                        if q < i:
+                        if q < stage_index:
                             # previous stages remain as-is (may have been updated by state file)
                             continue
                         self.set_stage_status(q, 'Queued')
                     except Exception:
                         pass
-                self.set_stage_status(i, f'Running stage {i+1}')
+                if p.get('is_clear'):
+                    self.set_clear_stage_status(status_index, 'Clearing dead volume')
+                else:
+                    self.set_stage_status(status_index, f'Running stage {status_index+1}')
             except Exception:
                 pass
 
@@ -1072,7 +1261,7 @@ class ExperimentGUI:
 
             script_text = build_script(
                 p['pressure'], int(round(p['disp_time'])), p['out_csv'],
-                p_tol=p['p_tol'], position=p['pos'], use_thermal=use_thermal,
+                p_tol=p['p_tol'], position=p['pos'], use_thermal=use_thermal and not p.get('is_clear'),
                 temp_lower=p['temp_lower'], temp_upper=p['temp_upper'],
                 temp_dwell=p['temp_dwell'], temp_ramp=p['temp_ramp'],
                 hold_mode=p['hold_mode'], hold_time_s=p['hold_time'],
@@ -1081,7 +1270,8 @@ class ExperimentGUI:
             script_text = script_text.replace('\x00', '').replace('\n', '\r\n')
 
             try:
-                self.status_var.set(f"Running stage {i+1} at reservoir valve # {p['pos']}…")
+                run_label = f"clear before Stage {status_index+1}" if p.get('is_clear') else f"stage {status_index+1}"
+                self.status_var.set(f"Running {run_label} at reservoir valve # {p['pos']}…")
                 self.root.update()
                 uProcess.SetScript(self.pipe, script_text)
                 uProcess.Run(self.pipe)
@@ -1109,7 +1299,8 @@ class ExperimentGUI:
                         state_file_path = p.get('state_file')
                         label = self.state_label_from_file(state_file_path)
                         if label:
-                            self.set_stage_status(i, label)
+                            if not p.get('is_clear'):
+                                self.set_stage_status(status_index, label)
                     except Exception:
                         pass
                 
@@ -1121,13 +1312,16 @@ class ExperimentGUI:
                         pass
                     # mark current stage as stopped
                     try:
-                        self.set_stage_status(i, 'Stopped')
+                        if p.get('is_clear'):
+                            self.set_clear_stage_status(status_index, 'Stopped')
+                        else:
+                            self.set_stage_status(status_index, 'Stopped')
                     except Exception:
                         pass
                     break
                     
             except Exception as e:
-                messagebox.showerror('Error', f'Stage failed for stage {i+1}: {e}')
+                messagebox.showerror('Error', f'Run failed for {run_label}: {e}')
                 break
 
             individual_csvs.append(p['out_csv'])
@@ -1137,10 +1331,16 @@ class ExperimentGUI:
                 final_label = self.state_label_from_file(p.get('state_file'))
                 if not final_label:
                     final_label = 'Completed'
-                self.set_stage_status(i, final_label)
+                if p.get('is_clear'):
+                    self.set_clear_stage_status(status_index, f'Clear stage: {final_label}')
+                else:
+                    self.set_stage_status(status_index, final_label)
             except Exception:
                 try:
-                    self.set_stage_status(i, 'Completed')
+                    if p.get('is_clear'):
+                        self.set_clear_stage_status(status_index, 'Clear stage: Completed')
+                    else:
+                        self.set_stage_status(status_index, 'Completed')
                 except Exception:
                     pass
 
@@ -1200,7 +1400,7 @@ class ExperimentGUI:
                 self.result_vars[idx].set(f'Stage {idx+1} Avg: N/A')
             else:
                 dev = abs(avg - p['desired_flow']) / p['desired_flow'] * 100.0
-                self.result_vars[idx].set(f'Stage {idx+1} Avg: {avg:.2f} uL/min (std: {std:.2f}; dev: {dev:.1f}%)')
+                self.result_vars[idx].set(f'Stage {idx+1} Avg: {avg:.2f} uL/min (std: {std:.2f} uL/min; dev: {dev:.1f}%)')
                 if dev > p['threshold_pct']:
                     exceeded.append((idx+1, avg, dev))
             
