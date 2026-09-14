@@ -77,7 +77,7 @@ python calibration_gui.py
 ```
 Then run experiments:
 ```bash
-python experiment.py
+python experiment_new.py
 ```
 The live plotter launches automatically during experiment execution.
 
