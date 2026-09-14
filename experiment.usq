@@ -1,497 +1,1030 @@
- ;Parameters 
-
-*4VM02	=	4VM ; Valve manifold
-
-*4AM01	=	4AM ; Analog manifold 
-
-*P15585	=	uPS 800 kPa ; pressure sensor
-
-*SPS_1	=	SPS	80 ul ; Syringe pump
-
-;*T00389 = uTS01 ; temperature sensor
-
-*LabSmith_4PM01 = 4PM ; power manifold 
-
-
-
-; Python prepends user constants above the script: 
-
-; ---- IF TEMP. CONTROL IS NEEDED ----
-
-; use_thermal
-
-; temp_lower 
-
-; temp_upper
-
-; temp_dwell
-
-; ramp_rate
-
-; ---- PRESSURE DRIVEN FLOW CONSTANTS ----
-
-; p_target
-
-; p_tol
-
-; dispense_time
-
-; position (reservoir position)
-; ---- OUTPUT FILES ----
-; state_output_file
-
-; output_file
-
-; ---- OTHER CONSTANTS ----
-; hold_mode 
-; hold_time
-; ---- STATE LABELS ----
-; 0: Idle/starting
-; 1: Heating to target
-; 2: Temperature dwell 
-; 3: Hold time without temperature control
-; 4: Initializing valves
-; 5: Depressurizing
-; 6: Dumping air and retrying 
-; 7: Refilling syringe 
-; 8: Pressurizing
-; 9: Stabilizing pressure
-; 10: Injecting
-; 11: Closing/shutdown
-; 12: Completed stage
-
-
-
-Setup: 
-
-		; AV201 Fill Valve is connected to 4VM channel 1
-
-		; Port A = open air
-
-		; Port B = reservoir/headspace
-
-
-
-		; AV801 Selector Valve is connected to 4VM channel 2
-
-		; AV801 closed port (with plugged port)
-
-	
-
-		closed = 1	
-
-		reservoir_count = 1				
-
-
-
-		; AV201 downstream Switching Valve is connected to 4VM channel 3
-
-
-
-Constants: 
-
-		fill_volume = 100		; syringe fill volume (default units: ul)
-
-		flow_rate = 500		; syringe flow rate. How fast it pushes and pulls 
-
-	
-
-		p_max = p_target+p_tol
-
-		count =1
-
-
-
-Log(output_file) ; begin logging data 
-system_state = 0
-LogEntry(state_output_file, 1) ; begin logging each state of the stage
-LogItem(state_output_file, "system_state", 1)
-
-LogEntry(state_output_file)
-LogItem(state_output_file, system_state)
-
-
-
-
-; --------------------------------------
-; Hold for set amount of time if hold is selected. If the user wants to hold for a certain temperature, 
-; the Peltier will heat up and then hold a temperature for the given amount of time in the given temperature interval. 
-; --------------------------------------
-
+ ;Parameters 
+
+
+
+
+
+*4VM02	=	4VM ; Valve manifold
+
+
+
+*4AM01	=	4AM ; Analog manifold 
+
+
+
+*P15585	=	uPS 800 kPa ; pressure sensor
+
+
+
+*SPS_1	=	SPS	80 ul ; Syringe pump
+
+
+
+;*T00389 = uTS01 ; temperature sensor
+
+
+
+*LabSmith_4PM01 = 4PM ; power manifold 
+
+
+
+
+
+
+
+; Python prepends user constants above the script: 
+
+
+
+; ---- IF TEMP. CONTROL IS NEEDED ----
+
+
+
+; use_thermal
+
+
+
+; temp_lower 
+
+
+
+; temp_upper
+
+
+
+; temp_dwell
+
+
+
+; ramp_rate
+
+
+
+; ---- PRESSURE DRIVEN FLOW CONSTANTS ----
+
+
+
+; p_target
+
+
+
+; p_tol
+
+
+
+; dispense_time
+
+
+
+; position (reservoir position)
+
+; ---- OUTPUT FILES ----
+
+; state_output_file
+
+
+
+; output_file
+
+
+
+; ---- OTHER CONSTANTS ----
+
+; hold_mode 
+
+; hold_time
+
+; ---- STATE LABELS ----
+
+; 0: Idle/starting
+
+; 1: Heating to target
+
+; 2: Temperature dwell 
+
+; 3: Hold time without temperature control
+
+; 4: Initializing valves
+
+; 5: Depressurizing
+
+; 6: Dumping air and retrying 
+
+; 7: Refilling syringe 
+
+; 8: Pressurizing
+
+; 9: Stabilizing pressure
+
+; 10: Injecting
+
+; 11: Closing/shutdown
+
+; 12: Completed stage
+
+
+
+
+
+
+
+Setup: 
+
+
+
+		; AV201 Fill Valve is connected to 4VM channel 1
+
+
+
+		; Port A = open air
+
+
+
+		; Port B = reservoir/headspace
+
+
+
+
+
+
+
+		; AV801 Selector Valve is connected to 4VM channel 2
+
+
+
+		; AV801 closed port (with plugged port)
+
+
+
+	
+
+
+
+		closed = 1	
+
+
+
+		reservoir_count = 1				
+
+
+
+
+
+
+
+		; AV201 downstream Switching Valve is connected to 4VM channel 3
+
+
+
+
+
+
+
+Constants: 
+
+
+
+		fill_volume = 100		; syringe fill volume (default units: ul)
+
+
+
+		flow_rate = 500		; syringe flow rate. How fast it pushes and pulls 
+
+
+
+	
+
+
+
+		p_max = p_target+p_tol
+
+
+
+		count =1
+
+
+
+
+
+
+
+Log(output_file) ; begin logging data 
+
+system_state = 0
+
+LogEntry(state_output_file, 1) ; begin logging each state of the stage
+
+LogItem(state_output_file, "system_state", 1)
+
+
+
+LogEntry(state_output_file)
+
+LogItem(state_output_file, system_state)
+
+
+
+
+
+
+
+
+
+; --------------------------------------
+
+; Hold for set amount of time if hold is selected. If the user wants to hold for a certain temperature, 
+
+; the Peltier will heat up and then hold a temperature for the given amount of time in the given temperature interval. 
+
+; --------------------------------------
+
+
+
 if (hold_mode == 1)
 		goto Hold
 goto Initialize
 
-Hold:
-		system_state = 3
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-		Wait(hold_time s)
-		goto End
-
-
-; --------------------------------------
-
-; Thermal warm-up, if selected
-
-; --------------------------------------
-
-
-if (use_thermal == 1)
-
-		goTo ThermalWarmup
-
-
-
-goto Initialize
-
-
-
-ThermalWarmup:
-
-		
-		system_state = 1
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-		; Start Peltier module output control
-
-		LabSmith_4PM01: SetPerChannel(Out4, DChA, ramp_rate V/s) ; assuming your connected to channel 4 on the power manifold 
-
-	
-
-		; Begin temperature regulation and leave it running
-
-		;T00389: RegBetween(temp_lower C, temp_upper C, DChA)
-
-		
-
-		; Adding the WaitDone() command will delay the start of timer until the target temperature reaches the specified temperature range 
-
-		WaitDone()
-
-		
-		system_state = 2
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-		; Hold temperature before starting flow 
-
-		Wait (temp_dwell s)
-
-		
-		if (hold_mode == 1)
-				goto End
-
-		; Thermal regulation is not stopping here. Holding the temperature until the power manifold is turned off. Start pressurizing the reservoirs 
-
-		goto Initialize
-
-
-
-; ---------------------------------------
-
-; Initialize valves and syringes 
-
-; ---------------------------------------
-
-
-
-Initialize:
-
-		system_state = 4
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-
-		SPS_1: SetFlowRate(flow_rate ul/min)	
-
-
-
-		4VM02:	SetValves(0, 0, 1, 0)	; downstream AV201 valve is first set to port A, then to closed (2 = closed on AV201 valve).  	
-
-		WaitDone()			; setting directly to closed at the beginning of a script may result in the wrong position 
-
-		4VM02:	SetValves(0, 0, 2, 0)	; as the valve does not know its current position 
-
-		WaitDone()
-
-
-
-		4VM02: SetSelection(2, closed)	; switch the AV801 selector valve to the set closed position
-
-		WaitDone()
-
-
-
-		p_now = P15585.Reading ; live reading from pressure sensor
-
-	
-
-		if (p_now > p_target + p_tol) ;if the current pressure is larger than the pressure target
-
-			goto DepressurizationStart
-
-	
-
-		goto Pressurize
-
-
-
-; -------------------------------------
-
-; Depressurize if pressure is too high
-
-; -------------------------------------
-
-
-
-DepressurizationStart:
-
-		system_state = 5
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-		4VM02: SetValves(3,0,0,0) ; switch to port B
-
-		4VM02: WaitDone()
-
-	
-
-		SPS_1: MoveWith(DChB)
-
-		P15585: RegDownTo(p_target kPa, DChB) ;pull air from reservoirs to depressurize
-
-			DLoop:
-
-				if (SPS_1.IsStalled) ; if the syringe has reached pull back capacity
-
-					goto DumpAndRetry ; dump air
-
-				if (P15585.IsDone == true)
-
-					goto Inject
-
-				Wait(1 s)
-
-			Goto DLoop
-
-
-
-; ----------------------------------------
-
-; Dump the air 
-
-; ----------------------------------------
-
-
-
-DumpAndRetry:
-
-		system_state = 6
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-		4VM02: SetValves(1,0,0,0)
-
-		4VM02: WaitDone()
-
-		SPS_1: MoveTo(0 ul)
-
-		SPS_1: WaitDone()
-
-		Goto DepressurizationStart
-
-
-
-; ----------------------------------------
-
-; Pressurize headspace
-
-; ----------------------------------------
-
- 
-
- 
-
-Pressurize:
-
-		system_state = 7
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-		4VM02:	SetValves(1, 0, 0, 0)	; switch AV201 fill valve to port a (1 = port A) 
-
-		4VM02: WaitDone()
-
-
-
-		SPS_1:	MoveTo(fill_volume)	; pull syringe_1 to fill with air
-
-		SPS_1: WaitDone()
-
-		
-		system_state = 8
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-
-		4VM02:	SetValves(3, 0, 0, 0)	; open AV201 fill valve to reservoir port (3 = port B)
-
-		SPS_1:	MoveWith(DChB)				
-
-		P15585:	RegUpTo (p_max kPa, DChB)
-
-			Loop1:
-
-				if (SPS_1.IsDone == true) ; If the syringe ran out of air while pressurizing, go back and refill with air and continue to pressurize
-
-					goto Pressurize
-
-				if (P15585.IsDone == true) ; If the pressure sensor reached p_max, go to the Inject function
-
-					goto Inject
-
-				Wait(1 s)
-
-			Goto Loop1
-
-
-
-; -------------------------------------
-
-; Dispense / pressure regulation
-
-; -------------------------------------
-
-
-
-Inject:
-
-		system_state = 7
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-
-		if (count == 1) ; Ordering of which reservoir you want to dispense
-
-			pos = position
-
-
-
-		4VM02:	SetValves(1, 0, 0, 0)	; set AV201 fill valve to port A 
-
-		4VM02: WaitDone()
-
-	
-
-		SPS_1:	MoveTo(fill_volume)	; pull syringe to fill with air
-
-		SPS_1: WaitDone()
-
-
-
-		4VM02:	SetValves(3, 0, 0, 0)	; set AV201 fill valve to port B
-
-		4VM02: WaitDone()	
-
-
-
-	
-
-		system_state = 9
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-
-		P15585:	HysteresisRegTo(p_target,p_tol,DChB) ; regulate pressure with p_tol tolerance. Basically if the pressure dips below p_target - p_tolerance, the syringe will push ever so slightly to gently increase the pressure. The regulation starts when the downstream AV201 valve switches to position B (the experiment).
-
-		SPS_1:	MoveWith(DChB)
-
-						
-
-
-
-		Wait(3 s);			; wait for pressure to stabilize
-
-		
-		system_state = 10
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-
-		4VM02: SetSelection(2, pos) ; set the selector valve to the correct reservoir
-
-		4VM02: WaitDone()		
-
-		4VM02:	SetValves(0, 0, 1, 0)	; set AV201 valve to position A
-
-		Wait(dispense_time s)		; inject for set time
-
-
-
-		4VM02: SetSelection(2, closed)	; close the AV801 valve 
-
-		4VM02: WaitDone()
-
-		
-
-		count = count +1 ; repeat process for the other reservoirs
-
-		if (count > reservoir_count)  
-
-			goto End
-
-
-
-		Goto Inject
-
-
-
-; -----------------------------------------
-
-; End/shutdown
-
-; -----------------------------------------
-
-
-
-End:
-
- 		system_state = 11
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
-
-		4VM02: SetSelection(2, closed)	; close the AV801 valve
-
-		SPS_1: Stop()		; stop syringe 
-
-		4AM01: Stop() 
-
-		
-
-		if (use_thermal == 1)
-
-			goto StopThermal
-
-		
-
-		goto Finish
-
-
-
-StopThermal:
-
-		LabSmith_4PM01: Stop()
-
-		goto Finish
-
-
-
-Finish:
-		system_state = 12
-		LogEntry(state_output_file)
-		LogItem(state_output_file, system_state)
-
+Hold:
+
+		system_state = 3
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+		Wait(hold_time s)
+
+		goto End
+
+
+
+
+
+; --------------------------------------
+
+
+
+; Thermal warm-up, if selected
+
+
+
+; --------------------------------------
+
+
+
+
+
+if (use_thermal == 1)
+
+
+
+		goTo ThermalWarmup
+
+
+
+
+
+
+
+goto Initialize
+
+
+
+
+
+
+
+ThermalWarmup:
+
+
+
+		
+
+		system_state = 1
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+		; Start Peltier module output control
+
+
+
+		LabSmith_4PM01: SetPerChannel(Out4, DChA, ramp_rate V/s) ; assuming your connected to channel 4 on the power manifold 
+
+
+
+	
+
+
+
+		; Begin temperature regulation and leave it running
+
+
+
+		;T00389: RegBetween(temp_lower C, temp_upper C, DChA)
+
+
+
+		
+
+
+
+		; Adding the WaitDone() command will delay the start of timer until the target temperature reaches the specified temperature range 
+
+
+
+		WaitDone()
+
+
+
+		
+
+		system_state = 2
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+		; Hold temperature before starting flow 
+
+
+
+		Wait (temp_dwell s)
+
+
+
+		
+
+		if (hold_mode == 1)
+
+				goto End
+
+
+
+		; Thermal regulation is not stopping here. Holding the temperature until the power manifold is turned off. Start pressurizing the reservoirs 
+
+
+
+		goto Initialize
+
+
+
+
+
+
+
+; ---------------------------------------
+
+
+
+; Initialize valves and syringes 
+
+
+
+; ---------------------------------------
+
+
+
+
+
+
+
+Initialize:
+
+
+
+		system_state = 4
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+
+
+		SPS_1: SetFlowRate(flow_rate ul/min)	
+
+
+
+
+
+
+
+		4VM02:	SetValves(0, 0, 1, 0)	; downstream AV201 valve is first set to port A, then to closed (2 = closed on AV201 valve).  	
+
+
+
+		WaitDone()			; setting directly to closed at the beginning of a script may result in the wrong position 
+
+
+
+		4VM02:	SetValves(0, 0, 2, 0)	; as the valve does not know its current position 
+
+
+
+		WaitDone()
+
+
+
+
+
+
+
+		4VM02: SetSelection(2, closed)	; switch the AV801 selector valve to the set closed position
+
+
+
+		WaitDone()
+
+
+
+
+
+
+
+		p_now = P15585.Reading ; live reading from pressure sensor
+
+
+
+	
+
+
+
+		if (p_now > p_target + p_tol) ;if the current pressure is larger than the pressure target
+
+
+
+			goto DepressurizationStart
+
+
+
+	
+
+
+
+		goto Pressurize
+
+
+
+
+
+
+
+; -------------------------------------
+
+
+
+; Depressurize if pressure is too high
+
+
+
+; -------------------------------------
+
+
+
+
+
+
+
+DepressurizationStart:
+
+
+
+		system_state = 5
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+		4VM02: SetValves(3,0,0,0) ; switch to port B
+
+
+
+		4VM02: WaitDone()
+
+
+
+	
+
+
+
+		SPS_1: MoveWith(DChB)
+
+
+
+		P15585: RegDownTo(p_target kPa, DChB) ;pull air from reservoirs to depressurize
+
+
+
+			DLoop:
+
+
+
+				if (SPS_1.IsStalled) ; if the syringe has reached pull back capacity
+
+
+
+					goto DumpAndRetry ; dump air
+
+
+
+				if (P15585.IsDone == true)
+
+
+
+					goto Inject
+
+
+
+				Wait(1 s)
+
+
+
+			Goto DLoop
+
+
+
+
+
+
+
+; ----------------------------------------
+
+
+
+; Dump the air 
+
+
+
+; ----------------------------------------
+
+
+
+
+
+
+
+DumpAndRetry:
+
+
+
+		system_state = 6
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+		4VM02: SetValves(1,0,0,0)
+
+
+
+		4VM02: WaitDone()
+
+
+
+		SPS_1: MoveTo(0 ul)
+
+
+
+		SPS_1: WaitDone()
+
+
+
+		Goto DepressurizationStart
+
+
+
+
+
+
+
+; ----------------------------------------
+
+
+
+; Pressurize headspace
+
+
+
+; ----------------------------------------
+
+
+
+ 
+
+
+
+ 
+
+
+
+Pressurize:
+
+
+
+		system_state = 7
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+		4VM02:	SetValves(1, 0, 0, 0)	; switch AV201 fill valve to port a (1 = port A) 
+
+
+
+		4VM02: WaitDone()
+
+
+
+
+
+
+
+		SPS_1:	MoveTo(fill_volume)	; pull syringe_1 to fill with air
+
+
+
+		SPS_1: WaitDone()
+
+
+
+		
+
+		system_state = 8
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+
+
+		4VM02:	SetValves(3, 0, 0, 0)	; open AV201 fill valve to reservoir port (3 = port B)
+
+
+
+		SPS_1:	MoveWith(DChB)				
+
+
+
+		P15585:	RegUpTo (p_max kPa, DChB)
+
+
+
+			Loop1:
+
+
+
+				if (SPS_1.IsDone == true) ; If the syringe ran out of air while pressurizing, go back and refill with air and continue to pressurize
+
+
+
+					goto Pressurize
+
+
+
+				if (P15585.IsDone == true) ; If the pressure sensor reached p_max, go to the Inject function
+
+
+
+					goto Inject
+
+
+
+				Wait(1 s)
+
+
+
+			Goto Loop1
+
+
+
+
+
+
+
+; -------------------------------------
+
+
+
+; Dispense / pressure regulation
+
+
+
+; -------------------------------------
+
+
+
+
+
+
+
+Inject:
+
+
+
+		system_state = 7
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+
+
+		if (count == 1) ; Ordering of which reservoir you want to dispense
+
+
+
+			pos = position
+
+
+
+
+
+
+
+		4VM02:	SetValves(1, 0, 0, 0)	; set AV201 fill valve to port A 
+
+
+
+		4VM02: WaitDone()
+
+
+
+	
+
+
+
+		SPS_1:	MoveTo(fill_volume)	; pull syringe to fill with air
+
+
+
+		SPS_1: WaitDone()
+
+
+
+
+
+
+
+		4VM02:	SetValves(3, 0, 0, 0)	; set AV201 fill valve to port B
+
+
+
+		4VM02: WaitDone()	
+
+
+
+
+
+
+
+	
+
+
+
+		system_state = 9
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+
+
+		P15585:	HysteresisRegTo(p_target,p_tol,DChB) ; regulate pressure with p_tol tolerance. Basically if the pressure dips below p_target - p_tolerance, the syringe will push ever so slightly to gently increase the pressure. The regulation starts when the downstream AV201 valve switches to position B (the experiment).
+
+
+
+		SPS_1:	MoveWith(DChB)
+
+
+
+						
+
+
+
+
+
+
+
+		Wait(3 s);			; wait for pressure to stabilize
+
+
+
+		
+
+		system_state = 10
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+
+
+		4VM02: SetSelection(2, pos) ; set the selector valve to the correct reservoir
+
+
+
+		4VM02: WaitDone()		
+
+
+
+		4VM02:	SetValves(0, 0, 1, 0)	; set AV201 valve to position A
+		
+		; --STOPWATCH VARIABLE--
+		elapsed_time = 0
+	
+	DispenseLoop:
+		if (SPS_1.IsDone == true) ; Triggered if the syringe finishes its stroke/runs dry if dispense time is too long 
+			goto MidRunRefill
+		Wait (1 s) ; The clock "tick"
+		elapsed_time = elapsed_time + 1
+		
+		if (elapsed_time < dispense_time)
+			goto DispenseLoop ; Loop back to continue dispensing 
+		
+		goto FinishDispense
+	
+	MidRunRefill:
+		4VM02: SetValves(0, 0, 2, 0); close downstream valve
+		4VM02: WaitDone()
+		
+		system_state = 7
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+		4VM02: SetValves(1, 0, 0, 0); set AV201 fill valve to air port 
+		4VM02: WaitDone()
+		SPS_1: MoveTo(fill_volume); pull syringe back to fill capacity 
+		SPS_1: WaitDone()
+		4VM02: SetValves(3, 0, 0, 0); set AV201 fill valve back to port B (the reservoir)
+		4VM02: WaitDone()
+		
+		; Re-establish target pressure inside the syringe loop 
+		system_state = 9
+		LogEntry(state_output_file)
+		LogItem(state_output_file, system_state)
+		P15585: HysteresisRegTo (p_target kPa, p_tol kPa, DChB)
+		SPS_1: MoveWith (DChB)
+		Wait(3 s)
+		
+		; Re-open downstream path and return to the stopwatch loop 
+		4VM02: SetValves(0, 0, 1, 0)
+		4VM02: WaitDone()
+		
+		system_state = 10
+		LogEntry(state_output_file)
+		LogItem(state_output_file, system_state)
+		goto DispenseLoop ; Jump right back into the count
+
+
+
+	FinishDispense:
+
+		4VM02: SetSelection(2, closed)	; close the AV801 valve 
+
+		4VM02: WaitDone()
+
+
+
+		
+
+
+
+		count = count +1 ; repeat process for the other reservoirs
+
+
+
+		if (count > reservoir_count)  
+
+
+
+			goto End
+
+
+
+
+
+
+
+		Goto Inject
+
+
+
+
+
+
+
+; -----------------------------------------
+
+
+
+; End/shutdown
+
+
+
+; -----------------------------------------
+
+
+
+
+
+
+
+End:
+
+
+
+ 		system_state = 11
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
+
+
+		4VM02: SetSelection(2, closed)	; close the AV801 valve
+
+
+
+		SPS_1: Stop()		; stop syringe 
+
+
+
+		4AM01: Stop() 
+
+
+
+		
+
+
+
+		if (use_thermal == 1)
+
+
+
+			goto StopThermal
+
+
+
+		
+
+
+
+		goto Finish
+
+
+
+
+
+
+
+StopThermal:
+
+
+
+		LabSmith_4PM01: Stop()
+
+
+
+		goto Finish
+
+
+
+
+
+
+
+Finish:
+
+		system_state = 12
+
+		LogEntry(state_output_file)
+
+		LogItem(state_output_file, system_state)
+
+
+
 		Log(off) 
