@@ -21,7 +21,7 @@ Four scripts work together:
     pick up from a chosen pressure, reusing saved trials below it
   - Uses `calibration_review_utils.py` and `calibration_resume_utils.py` as
     helper modules- keep both next to `calibration_gui.py`
-- **experiment.py** - the main GUI for your project. You select a calibration
+- **experiment_new.py** - the main GUI for your project. You select a calibration
   curve based on your desired solution per stage/reservoir, enter desired flow
   rates and volumes per reservoir, and it computes the required pressures and
   dispense times, runs each reservoir in sequence via uProcess, and saves
@@ -29,6 +29,9 @@ Four scripts work together:
   - Optional thermal control, with temperature stabilization before dispensing
   - **Hold stages** - hold pressure/temperature for a set duration with no
     flow or dispense math, instead of using a calibration curve
+  - **Clear stages** - each stage has a compact clear-stage control for its
+    own tubing volume and desired flow rate; pressure is calculated from that
+    stage's calibration curve before it runs ahead of Stage 1 and every later stage
   - Pause / Resume / Stop controls mid-run
   - A live, per-stage status label (e.g. "Pressurizing," "Injecting") read
     from each stage's state CSV
@@ -77,7 +80,7 @@ python calibration_gui.py
 ```
 Then run experiments:
 ```bash
-python experiment_new.py
+python experiment.py
 ```
 The live plotter launches automatically during experiment execution.
 
