@@ -42,6 +42,7 @@ from tkinter import ttk, messagebox, simpledialog
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+from gui_help import show_help_window
 from calibration_review_utils import format_trial_values_for_prompt, remove_trials_by_numbers
 from calibration_resume_utils import (
     collect_existing_pressure_results,
@@ -177,15 +178,27 @@ class CalibrationGUI:
         self.root.geometry("1450x950")
         self.root.minsize(1150, 800)
 
+        # Header bar: title on the left, Help & Notes button on the right
+        header = ttk.Frame(self.root, padding=(10, 10, 10, 0))
+        header.grid(row=0, column=0, columnspan=2, sticky="we")
+        ttk.Label(header, text="Pressure-to-Flow Calibration", font=("TkDefaultFont", 14, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(header, text="Help & Notes (F1)", command=self.show_help).grid(row=0, column=1, sticky="e")
+        ttk.Separator(header, orient="horizontal").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        header.grid_columnconfigure(0, weight=1)
+        self.help_window = None
+        self.root.bind("<F1>", lambda e: self.show_help())
+
         left = ttk.Frame(self.root, padding=10)
-        left.grid(row=0, column=0, sticky="nswe")
+        left.grid(row=1, column=0, sticky="nswe")
 
         right = ttk.Frame(self.root, padding=10)
-        right.grid(row=0, column=1, sticky="nswe")
+        right.grid(row=1, column=1, sticky="nswe")
 
         self.root.grid_columnconfigure(0, weight=0)
         self.root.grid_columnconfigure(1, weight=1)
-        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_rowconfigure(1, weight=1)
 
         ttk.Label(left, text="Calibration Settings", font=("TkDefaultFont", 12, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
@@ -218,24 +231,6 @@ class CalibrationGUI:
             row=11, column=0, columnspan=2, sticky="w"
         )
 
-        help_text = (
-            "Notes:\n"
-            "- Pressure targets are generated from a lower bound, upper bound, and increment value.\n"
-            "  Example: lower=2, upper=20, increment=2, P = [2,4,6,...,20]\n"
-            "- The GUI shows trial results as they complete.\n"
-            "- On startup the app asks to resume any unfinished calibration folder, meaning one that has\n"
-            "  trial CSVs but no calibration_coeffs.txt and no calibration_plot.png.\n"
-            "- Resuming reuses the saved trials below the chosen start pressure and re-runs everything\n"
-            "  from it upward, then saves the coefficients and plot as usual.\n"
-            "- After each pressure group completes, refill the reservoir before continuing to the next pressure.\n"
-            "- Click refill and continue when you finish refilling.\n"
-            "- Prime the liquid lines before injection to remove trapped air and ensure consistent flow.\n"
-            "- The final calibration plot will appear on the right when done."
-        )
-        ttk.Label(left, text=help_text, wraplength=320, justify="left").grid(
-            row=12, column=0, columnspan=2, sticky="w", pady=(14, 0)
-        )
-
         left.grid_columnconfigure(1, weight=1)
 
         ttk.Label(right, text="Calibration Results", font=("TkDefaultFont", 12, "bold")).grid(
@@ -253,10 +248,10 @@ class CalibrationGUI:
         )
         self.tree.heading("pressure", text="Pressure (kPa)")
         self.tree.heading("trials", text="Flow Rate (uL/min)")
-        self.tree.heading("mean", text="Mean")
-        self.tree.heading("std", text="Standard Deviation")
+        self.tree.heading("mean", text="Mean (uL/min)")
+        self.tree.heading("std", text="Standard Deviation (uL/min)")
         self.tree.column("pressure", width=110, anchor="center")
-        self.tree.column("trials", width=500, anchor="w")
+        self.tree.column("trials", width=350, anchor="w")
         self.tree.column("mean", width=100, anchor="center")
         self.tree.column("std", width=100, anchor="center")
 
@@ -284,6 +279,36 @@ class CalibrationGUI:
         right.grid_rowconfigure(1, weight=1)
         right.grid_rowconfigure(3, weight=1)
         right.grid_columnconfigure(0, weight=1)
+
+    def show_help(self):
+        '''Open the Help & Notes window (or raise it if already open).'''
+        sections = [
+            ("How to use", [
+                "Prime the liquid lines and fill the reservoir.",
+                "Enter a calibration name, pressure range, dispense time, tolerance, and trials per pressure.",
+                "Press Start Calibration. Trial results fill in on the right as they complete.",
+                "After each pressure, review the trials (remove any bad ones), refill the reservoir, "
+                "then press Refill and Continue.",
+                "When finished, the fit and plot appear on the right and are saved to CalibrationData/<name>.",
+            ], True),
+            ("Settings", [
+                "Pressure targets come from the lower bound, upper bound, and increment. "
+                "Example: lower=2, upper=20, increment=2 gives P = [2, 4, 6, ..., 20].",
+                "Choose the dispense time from the channel volume and desired flow rate, leaving enough "
+                "time for the flow to stabilize and reach steady state.",
+                "The default reservoir is #4. If you use a different one, update the logic script before starting.",
+            ], False),
+            ("Resuming an unfinished calibration", [
+                "On startup the app offers to resume any folder that has trial CSVs but no "
+                "calibration_coeffs.txt and no calibration_plot.png.",
+                "Resuming reuses the saved trials below the chosen start pressure, re-runs everything from it "
+                "upward, then saves the coefficients and plot as usual.",
+            ], False),
+            ("Tips", [
+                "Prime the liquid lines before injection to remove trapped air and ensure consistent flow.",
+            ], False),
+        ]
+        self.help_window = show_help_window(self.root, "Calibration - Help & Notes", sections, self.help_window)
 
     def _get_resume_dispense_time(self) -> float:
         '''Best-effort parse of the current dispense time for resume scanning.'''

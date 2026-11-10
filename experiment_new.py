@@ -26,6 +26,8 @@ import shutil
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from gui_help import show_help_window
+
 # Third-party imports
 import pandas as pd
 import numpy as np
@@ -311,6 +313,107 @@ def compute_steady_stats_from_dispense(df, time_col, flow_col, dispense_time_s, 
     return mean_flow, std_flow
 
 
+INJECTING_STATE = 10  # system_state value written by the uProcess script while injecting
+
+
+def read_injecting_intervals(state_file):
+    '''
+    Read a per-stage state file and return the time intervals spent injecting.
+
+    The state file contains one row per state change with a 'Time (s)' column and a
+    'system_state' column. Each injecting row lasts until the next state change; if
+    the file ends while injecting, the interval is left open (end = None).
+
+    Parameters:
+    - state_file: path to the stage's state CSV written by the uProcess script
+
+    Returns:
+    A list of (start_s, end_s) tuples, empty if the file is missing or unreadable
+    '''
+    if not state_file or not os.path.exists(state_file):
+        return []
+    try:
+        with open(state_file, 'r') as f:
+            lines = [l.strip() for l in f if l.strip()]
+    except Exception:
+        return []
+
+    # Locate the header row that names the system_state column
+    header_idx = next((i for i, l in enumerate(lines) if 'system_state' in l.lower()), None)
+    if header_idx is None:
+        return []
+    header = [h.strip().strip('"').lower() for h in lines[header_idx].split(';')]
+    time_idx  = next((i for i, h in enumerate(header) if h == 'time (s)'), None)
+    state_idx = header.index('system_state')
+    if time_idx is None:
+        return []
+
+    events = []
+    for line in lines[header_idx + 1:]:
+        parts = [p.strip().strip('"') for p in line.split(';')]
+        try:
+            events.append((float(parts[time_idx]), int(float(parts[state_idx]))))
+        except Exception:
+            continue
+
+    intervals = []
+    for k, (t, state) in enumerate(events):
+        if state != INJECTING_STATE:
+            continue
+        end = events[k + 1][0] if k + 1 < len(events) else None
+        intervals.append((t, end))
+    return intervals
+
+
+def compute_steady_stats_from_injecting(df, time_col, flow_col, state_file):
+    '''
+    Compute steady-state flow statistics using only the time spent injecting.
+
+    Injecting intervals come from the stage's state file, so syringe refills (which
+    show ~0 flow) are excluded. The injecting segments are stitched end to end on a
+    continuous time axis, then the mean and standard deviation are taken over the
+    middle half of that stitched window to avoid transients.
+
+    Parameters:
+    - df:          DataFrame containing the run data
+    - time_col:    name of the time column (same clock as the state file's Time (s))
+    - flow_col:    name of the flow column
+    - state_file:  path to the stage's state CSV
+
+    Returns:
+    A tuple of (mean_flow, std_flow), or (None, None) if no injecting data is found
+    '''
+    if df is None or len(df) == 0:
+        return None, None
+
+    intervals = read_injecting_intervals(state_file)
+    if not intervals:
+        return None, None
+
+    segments, offset = [], 0.0
+    for start, end in intervals:
+        if end is None:
+            end = float(df[time_col].max())
+        seg = df[(df[time_col] >= start) & (df[time_col] <= end)]
+        if seg.empty:
+            continue
+        seg = seg.assign(_inject_t=seg[time_col] - start + offset)
+        offset += end - start
+        segments.append(seg)
+    if not segments:
+        return None, None
+
+    injecting = pd.concat(segments, ignore_index=True)
+    sample = injecting[(injecting['_inject_t'] >= offset / 4.0) &
+                       (injecting['_inject_t'] <= 3.0 * offset / 4.0)]
+    if sample.empty:
+        sample = injecting
+
+    mean_flow = float(np.mean(sample[flow_col]))
+    std_flow = float(np.std(sample[flow_col], ddof=0))
+    return mean_flow, std_flow
+
+
 def compute_steady_mean_from_dispense(df, time_col, flow_col, dispense_time_s, position=None):
     '''Backward-compatible wrapper returning the steady-state mean flow only.'''
     mean_flow, _ = compute_steady_stats_from_dispense(df, time_col, flow_col, dispense_time_s, position)
@@ -424,6 +527,25 @@ class ExperimentGUI:
         style.configure('TCombobox', font=('Segoe UI', 12))
         style.configure('TLabelframe', font=('Segoe UI', 12))
 
+        # White window background instead of the default grey
+        bg = 'white'
+        root.configure(bg=bg)
+        style.configure('TFrame', background=bg)
+        style.configure('TLabel', background=bg)
+        style.configure('TCheckbutton', background=bg)
+
+        # Header bar: title on the left, Help & Notes button on the right
+        header_bg, header_fg = '#e8f1fb', '#1a3d6d'
+        header = tk.Frame(root, bg=header_bg, highlightbackground='#2f6db5', highlightthickness=2)
+        header.grid(row=0, column=0, sticky='ew', padx=16, pady=(12, 0))
+        tk.Label(header, text='uProcess Experiment Runner', font=('Segoe UI', 14, 'bold'),
+                 fg=header_fg, bg=header_bg).grid(row=0, column=0, sticky='w', padx=10, pady=6)
+        ttk.Button(header, text='Help & Notes (F1)', command=self.show_help).grid(
+            row=0, column=1, sticky='e', padx=10, pady=6)
+        header.grid_columnconfigure(0, weight=1)
+        self.help_window = None
+        root.bind('<F1>', lambda e: self.show_help())
+
         self.curves          = find_calibration_curves(CALIB_DIR)
         self.live_state_file = os.path.join(BASE_DIR, 'live_state.json')
         self.plot_proc       = None
@@ -443,14 +565,14 @@ class ExperimentGUI:
 
         # Single column layout for all controls
         main = ttk.Frame(root, padding=10)
-        main.grid(row=0, column=0, sticky='nswe', padx=6, pady=6)
+        main.grid(row=1, column=0, sticky='nswe', padx=6, pady=6)
         main.grid_columnconfigure(0, weight=0)
         main.grid_columnconfigure(1, weight=1)
         main.grid_columnconfigure(2, weight=0)
         main.grid_columnconfigure(3, weight=1)
         main.grid_columnconfigure(4, weight=0)
         main.grid_columnconfigure(5, weight=1)
-        root.grid_rowconfigure(0, weight=1)
+        root.grid_rowconfigure(1, weight=1)
         root.grid_columnconfigure(0, weight=1)
 
         # Global controls (Project name and Number of stages)
@@ -474,7 +596,7 @@ class ExperimentGUI:
         ttk.Checkbutton(main, text='Enable Temperature Control',
                         variable=self.thermal_enabled_var,
                         command=self.on_thermal_control_toggled).grid(row=2, column=0, columnspan=6, sticky='w', pady=2)
-        
+
         # Include timestamp in individual files checkbox
         ttk.Checkbutton(main, text='Include Timestamp in Individual Files',
                         variable=self.include_timestamp_var).grid(row=3, column=0, columnspan=2, sticky='w', pady=2)
@@ -487,7 +609,7 @@ class ExperimentGUI:
 
         container       = ttk.Frame(main)
         container.grid(row=4, column=0, columnspan=6, sticky='nsew', pady=(10, 0))
-        self.res_canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+        self.res_canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0, bg=bg)
         res_scrollbar   = ttk.Scrollbar(container, orient='vertical', command=self.res_canvas.yview)
         self.res_inner  = ttk.Frame(self.res_canvas)
         self.res_inner.bind('<Configure>',
@@ -499,24 +621,13 @@ class ExperimentGUI:
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
-        # Results, status, notes, and buttons
+        # Results, status, and buttons
         self.result_frame = ttk.Frame(main)
         self.result_frame.grid(row=5, column=0, columnspan=6, sticky='w')
 
         self.status_var = tk.StringVar(value='Ready')
         ttk.Label(main, textvariable=self.status_var).grid(row=6, column=0, columnspan=6, sticky='w')
 
-        notes = ttk.Frame(main)
-        notes.grid(row=10, column=0, columnspan=6, sticky='w')
-        ttk.Label(notes, text='Note: Temperature has to stabilize before pressurization begins. Stabilization time is determined by the temp_dwell parameter in the script and can be set per run in this GUI.',
-                  font=('Segoe UI', 12, 'bold')).grid(row=0, column=0, sticky='w', pady=1)
-        ttk.Label(notes, text='Note: Each stage is preceded by a clear stage that pushes the configured dead volume '
-                      'at the configured clear pressure; the stage calibration determines its estimated flow.',
-                  font=('Segoe UI', 12, 'bold')).grid(row=1, column=0, sticky='w', pady=1)
-        ttk.Label(notes, text='Note: Prime the liquid lines before injection to remove trapped air and ensure consistent flow.',
-                  font=('Segoe UI', 12, 'bold')).grid(row=2, column=0, sticky='w', pady=1)
-        ttk.Label(notes, text='Note: If one reservoir fails repeatedly, check the AV801 valve port for clogging, dried reagent, or a valve-motor issue; the programmed position may not match the true mechanical position. Flush with DI water after use.',
-                  font=('Segoe UI', 12, 'bold')).grid(row=3, column=0, sticky='w', pady=1)
         # Button frame for experiment control
         btn_frame = ttk.Frame(main)
         btn_frame.grid(row=8, column=0, columnspan=3, sticky='ew', pady=6)
@@ -1190,7 +1301,7 @@ class ExperimentGUI:
             run_params.append(stage_param)
 
             if clear_volume > 0:
-                clear_base = f'{exp_name}_ClearBeforeStage{i+1}_Res{pos}'
+                clear_base = f'{exp_name}_Clear_Stage{i+1}_Res{pos}'
                 if include_ts:
                     clear_csv = os.path.join(out_dir, f'{clear_base}_{timestamp}.csv').replace('\\', '/')
                 else:
@@ -1257,7 +1368,10 @@ class ExperimentGUI:
             except Exception:
                 pass
 
-            self.write_live_state(csv_path=p['out_csv'], run_index=i)
+            # Clear stages share their stage's color but are drawn dotted in the live plot
+            stage_label = f'Clear Stage {stage_index+1}' if p.get('is_clear') else f'Stage {stage_index+1}'
+            self.write_live_state(csv_path=p['out_csv'], run_index=i, label=stage_label,
+                                  color_index=stage_index, is_clear=p.get('is_clear', False))
 
             script_text = build_script(
                 p['pressure'], int(round(p['disp_time'])), p['out_csv'],
@@ -1352,14 +1466,14 @@ class ExperimentGUI:
                                          if any(k in c.lower() for k in ('press', 'kpa'))), None)
                     plot_overlay(df, tcol, fcol, pressure_col,
                                  p['out_csv'].replace('.csv', '.png'),
-                                 title=f'Res{i+1} trace')
+                                 title=f'{stage_label} Trace')
                     if use_thermal:
                         temp_col = next((c for c in df.columns
                                           if 'T00389' in c or ('temp' in c.lower() and '(c)' in c.lower())), None)
                         if temp_col:
                             plot_temperature(df, tcol, temp_col,
                                              p['out_csv'].replace('.csv', '_temperature.png'),
-                                             title=f'Res{i+1} temperature')
+                                             title=f'{stage_label} Temperature')
             except Exception:
                 pass
 
@@ -1390,7 +1504,11 @@ class ExperimentGUI:
                 continue
             try:
                 tcol, fcol, dfi = extract_flow(p['out_csv'])
-                avg, std = compute_steady_stats_from_dispense(dfi, tcol, fcol, p['disp_time'], p['pos'])
+                # Average only while injecting (excludes syringe refills); fall back to the
+                # valve-based dispense window if the state file has no injecting data
+                avg, std = compute_steady_stats_from_injecting(dfi, tcol, fcol, p.get('state_file'))
+                if avg is None:
+                    avg, std = compute_steady_stats_from_dispense(dfi, tcol, fcol, p['disp_time'], p['pos'])
             except Exception:
                 avg = None
                 std = None
@@ -1436,7 +1554,6 @@ class ExperimentGUI:
         - Experiment metadata (name, date/time, settings)
         - Per-experiment parameters (calibration, valve position, flow, volume, etc.)
         - Per-experiment results (steady-state flow, deviation from desired)
-        - Summary statistics and threshold violations
 
         Parameters:
         - run_params:   list of run parameter dicts with all experimental settings
@@ -1511,30 +1628,8 @@ class ExperimentGUI:
                     csv_path = p.get('out_csv', 'N/A')
                     f.write(f'    Output CSV:           {os.path.basename(csv_path)}\n')
                     f.write('\n')
-                
-                # Summary statistics
-                f.write('SUMMARY STATISTICS\n')
-                f.write('-' * 80 + '\n')
-                
-                valid_flows = [r['avg_flow'] for r in results if r['avg_flow'] is not None]
-                valid_stds = [r['std_flow'] for r in results if r['std_flow'] is not None]
-                valid_devs = [r['dev_pct'] for r in results if r['dev_pct'] is not None]
-                
-                if valid_flows:
-                    f.write(f'Average Steady-State Flow:  {np.mean(valid_flows):.2f} µL/min\n')
-                    f.write(f'Min Steady-State Flow:      {np.min(valid_flows):.2f} µL/min\n')
-                    f.write(f'Max Steady-State Flow:      {np.max(valid_flows):.2f} µL/min\n')
 
-                if valid_stds:
-                    f.write(f'Average Steady-State Std Dev: {np.mean(valid_stds):.2f} µL/min\n')
-                    f.write(f'Min Steady-State Std Dev:     {np.min(valid_stds):.2f} µL/min\n')
-                    f.write(f'Max Steady-State Std Dev:     {np.max(valid_stds):.2f} µL/min\n')
-                
-                if valid_devs:
-                    exceeded_count = sum(1 for d in valid_devs if d > threshold_pct)
-                    f.write(f'Stages Exceeding Desired Flow Threshold: {exceeded_count}/{len(results)}\n')
-                
-                f.write('\n' + '=' * 80 + '\n')
+                f.write('=' * 80 + '\n')
                 
         except Exception as e:
             print(f'Error saving experiment summary: {e}')
@@ -1623,21 +1718,26 @@ class ExperimentGUI:
             messagebox.showwarning('Warning', f'Could not combine CSVs: {e}')
             self.status_var.set('Done with warnings')
 
-    def write_live_state(self, csv_path=None, run_index=0, done=False):
+    def write_live_state(self, csv_path=None, run_index=0, done=False,
+                         label=None, color_index=None, is_clear=False):
         '''
         Write a JSON file that tells the external live plotter which CSV is currently active.
         The live plotter polls this file and updates its display in real time.
 
         Parameters:
-        - csv_path:  path to the CSV currently being written (None when idle or done)
-        - run_index: index of the current run (0-based)
-        - done:      True when the full experiment sequence has finished
+        - csv_path:    path to the CSV currently being written (None when idle or done)
+        - run_index:   index of the current run (0-based)
+        - done:        True when the full experiment sequence has finished
+        - label:       legend label for this run (e.g. 'Clear Stage 1', 'Stage 1')
+        - color_index: color slot for this run; a clear stage uses its stage's slot
+        - is_clear:    True for clear stages, which are drawn dotted
 
         Returns: None
         '''
         try:
             with open(self.live_state_file, 'w') as f:
-                json.dump({'csv_path': csv_path, 'run_index': run_index, 'done': done}, f)
+                json.dump({'csv_path': csv_path, 'run_index': run_index, 'done': done,
+                           'label': label, 'color_index': color_index, 'is_clear': is_clear}, f)
         except Exception as e:
             print(f'write_live_state error: {e}')
 
@@ -1656,6 +1756,37 @@ class ExperimentGUI:
             )
         except Exception as e:
             print(f'Could not start live plotter: {e}')
+
+    def show_help(self):
+        '''
+        Open the Help & Notes window (or raise it if already open).
+
+        Returns: None
+        '''
+        sections = [
+            ('How to use', [
+                'Prime the liquid lines and fill the reservoirs.',
+                'Enter a project name, choose the number of stages, and enable temperature control if needed.',
+                'For each stage, pick a calibration curve (or Hold) and enter the reservoir valve, flow, volume, '
+                'tolerance, and clear-stage dead volume/flow.',
+                'Press Compute All to preview the target pressures and dispense times.',
+                'Press Execute Project to run. Use Pause, Resume, or Stop as needed. '
+                'Results are saved to ExperimentData/<project name>.',
+            ], True),
+            ('How a run works', [
+                'Each stage is preceded by a clear stage that pushes the configured dead volume at the '
+                'configured clear pressure; the stage calibration determines its estimated flow.',
+                'With temperature control on, temperature must stabilize before pressurization begins. '
+                'Stabilization time is set by the temp_dwell parameter, which can be changed per run here.',
+            ], False),
+            ('Tips & troubleshooting', [
+                'Prime the liquid lines before injection to remove trapped air and ensure consistent flow.',
+                'If one reservoir fails repeatedly, check the AV801 valve port for clogging, dried reagent, '
+                'or a valve-motor issue; the programmed position may not match the true mechanical position.',
+                'Flush with DI water after use.',
+            ], False),
+        ]
+        self.help_window = show_help_window(self.root, 'Experiment - Help & Notes', sections, self.help_window)
 
     def on_close(self):
         '''
