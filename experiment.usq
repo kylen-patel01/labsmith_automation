@@ -3,7 +3,7 @@
 *4AM01	=	4AM ; Analog manifold 
 *P15585	=	uPS 800 kPa ; pressure sensor
 *SPS_1	=	SPS	80 ul ; Syringe pump
-;*T00389 = uTS01 ; temperature sensor
+;*T00389 = uTS01 ; temperature sensor ; uncomment this line if you are planning on adding the thermocouple to your system
 *LabSmith_4PM01 = 4PM ; power manifold 
 ; Python prepends user constants above the script: 
 ; ---- IF TEMP. CONTROL IS NEEDED ----
@@ -233,7 +233,7 @@ Inject:
 		LogEntry(state_output_file)
 		LogItem(state_output_file, system_state)
 
-		P15585:	HysteresisRegTo(p_target,p_tol,DChB) ; regulate pressure with p_tol tolerance. Basically if the pressure dips below p_target - p_tolerance, the syringe will push ever so slightly to gently increase the pressure. The regulation starts when the downstream AV201 valve switches to position B (the experiment).
+		P15585:	HysteresisRegTo(p_target,p_tol,DChB) ; regulate pressure with p_tol tolerance. Basically if the pressure dips below p_target - p_tolerance, the syringe will push ever so slightly to gently increase the pressure. The regulation starts when the downstream AV201 valve switches to position A (toward the experiment).
 		SPS_1:	MoveWith(DChB)
 
 		Wait(3 s);			; wait for pressure to stabilize
