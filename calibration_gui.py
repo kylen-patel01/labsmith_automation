@@ -295,8 +295,27 @@ class CalibrationGUI:
                 "Pressure targets come from the lower bound, upper bound, and increment. "
                 "Example: lower=2, upper=20, increment=2 gives P = [2, 4, 6, ..., 20].",
                 "Choose the dispense time from the channel volume and desired flow rate, leaving enough "
-                "time for the flow to stabilize and reach steady state.",
+                "time for the flow to stabilize and reach steady state. See \"Channel geometry and "
+                "dispense time\" below. Geometry matters a lot here.",
                 "The default reservoir is #4. If you use a different one, update the logic script before starting.",
+            ], False),
+            ("IMPORTANT: Channel geometry and dispense time", [
+                "Your channel geometry largely sets the right dispense time. A time that works for one "
+                "chip or tubing setup can be far too short for another.",
+                "Width/diameter: flow resistance rises steeply as the channel narrows (roughly 1/d^4 for "
+                "round tubing, 1/(w*h^3) for shallow rectangular channels). Halving the diameter cuts flow "
+                "about 16x at the same pressure, so narrow channels need much longer dispense times to "
+                "collect a measurable volume.",
+                "Length: resistance scales with length. Longer channels or extra tubing mean lower flow "
+                "and a longer dispense time.",
+                "Volume and dead volume: the flow has to fill the channel, fittings, and outlet path before "
+                "the collected volume reflects steady flow. Larger internal volumes need more time.",
+                "Compliance: soft tubing, PDMS, and trapped air bubbles act like a capacitor and slow the "
+                "rise to steady state. Allow extra time, especially at low pressures.",
+                "Low pressures are the worst case: flow is slowest, so check that the dispense time is long "
+                "enough at your LOWEST pressure, not just the highest.",
+                "A calibration only applies to the geometry it was measured on. If you change the chip, "
+                "channel, tubing length, or fittings, run a new calibration.",
             ], False),
             ("Resuming an unfinished calibration", [
                 "On startup the app offers to resume any folder that has trial CSVs but no "
