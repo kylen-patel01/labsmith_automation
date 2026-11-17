@@ -1603,7 +1603,7 @@ class ExperimentGUI:
                 for i, (p, r) in enumerate(zip(run_params, results)):
                     f.write(f'Stage {i+1}\n')
                     f.write('  Parameters:\n')
-                    f.write(f'    Calibration Curve:    {os.path.basename(p["out_dir"]) if "out_dir" in p else "N/A"}\n')
+                    f.write(f'    Project Name:    {os.path.basename(p["out_dir"]) if "out_dir" in p else "N/A"}\n')
                     f.write(f'    Valve Position:       {p["pos"]}\n')
                     f.write(f'    Desired Flow:         {p["desired_flow"]:.2f} µL/min\n')
                     f.write(f'    Dispense Volume:      {p["desired_flow"] * p["disp_time"] / 60:.2f} µL\n')
